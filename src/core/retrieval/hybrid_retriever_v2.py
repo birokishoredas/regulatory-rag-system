@@ -4,50 +4,56 @@ import asyncio
 import asyncpg
 from typing import List, Dict, Any, Optional
 from langgraph.graph import StateGraph, START
-from src.embeddings.embedder import create_embedder
-from utils.models import RetrievedChunk, RetrievalState
+from src.infra.models.embedder import create_embedder
+from src.shared.schemas import RetrievedChunk, RetrievalState
 from logger import GLOBAL_LOGGER as log
 from exception.custom_exception import RegulatoryRAGException
 
 
 class HybridRetriever:
     """
-    Production-grade hybrid retriever (V2)
-    Score-calibrated + strict filtering + adaptive weighting.
+    Production-grade hybrid retriever (V2 - structure-aware upgrade).
+
+    Enhancements over base version:
+        - Query expansion for improved semantic recall
+        - Metadata-aware fusion (section boosting)
+        - Annex-aware penalty handling
+        - Larger candidate pool for better reranking
+        - Fixed reranker execution (sync-safe)
+
+    Combines:
+        - BM25 (PostgreSQL full-text search)
+        - Dense vector similarity (pgvector)
+        - Score-level weighted fusion with dynamic weighting
     """
 
     def __init__(
         self,
         *,
         top_k: int = 10,
-        bm25_k: int = 20,
-        vector_k: int = 20,
+        bm25_k: int = 30,
+        vector_k: int = 40,
         bm25_weight: float = 0.3,
         vector_weight: float = 0.7,
         bm25_timeout: float = 30,
         vector_timeout: float = 30,
     ):
         """
-        Initialize the HybridRetriever V2.
-
-        This retriever performs hybrid retrieval using:
-        - BM25 (PostgreSQL full-text search)
-        - Dense vector similarity (pgvector)
-        - Score-level weighted fusion with dynamic weighting
-        - Strict metadata filtering enforcement
+        Initialize the HybridRetriever.
 
         Parameters:
             top_k (int): Final number of results returned after fusion.
-            bm25_k (int): Number of candidates retrieved from BM25.
-            vector_k (int): Number of candidates retrieved from vector search.
-            bm25_weight (float): Default weight assigned to BM25 scores.
-            vector_weight (float): Default weight assigned to vector scores.
+            bm25_k (int): BM25 candidate pool size.
+            vector_k (int): Vector search candidate pool size.
+            bm25_weight (float): Weight assigned to BM25 scores.
+            vector_weight (float): Weight assigned to vector scores.
             bm25_timeout (float): Timeout (seconds) for BM25 retrieval.
             vector_timeout (float): Timeout (seconds) for vector retrieval.
 
         Raises:
-            RuntimeError: If DATABASE_URL environment variable is not set.
+            RuntimeError: If DATABASE_URL is not set.
         """
+
         self.top_k = top_k
         self.bm25_k = bm25_k
         self.vector_k = vector_k
@@ -76,19 +82,33 @@ class HybridRetriever:
         )
 
     # -------------------------------------------------
+    # Query Expansion
+    # -------------------------------------------------
+
+    def _expand_query(self, query: str) -> str:
+        """
+        Expands query with regulatory context hints.
+
+        Improves recall for dense vector retrieval.
+
+        Returns:
+            str: Expanded query.
+        """
+        return f"""
+        {query}
+
+        Related concepts:
+        - definitions
+        - requirements
+        - thresholds
+        - conditions
+        """
+
+    # -------------------------------------------------
     # DB Helpers
     # -------------------------------------------------
 
     async def _get_conn(self):
-        """
-        Create and return a new async PostgreSQL connection.
-
-        Returns:
-            asyncpg.Connection: Active database connection.
-
-        Raises:
-            Exception: If connection establishment fails.
-        """
         try:
             return await asyncpg.connect(self.database_url)
         except Exception as e:
@@ -96,15 +116,6 @@ class HybridRetriever:
             raise
 
     def _parse_json(self, val):
-        """
-        Safely parse JSON metadata returned from the database.
-
-        Parameters:
-            val: JSON string or already-parsed object.
-
-        Returns:
-            Parsed Python object if string, otherwise original value.
-        """
         return json.loads(val) if isinstance(val, str) else val
 
     # -------------------------------------------------
@@ -112,19 +123,6 @@ class HybridRetriever:
     # -------------------------------------------------
 
     def _min_max_normalize(self, results):
-        """
-        Apply per-query min-max normalization to retrieval scores.
-
-        Normalizes raw retrieval scores into the range [0, 1]
-        to enable calibrated score-level fusion between BM25
-        and dense vector results.
-
-        Parameters:
-            results (List[RetrievedChunk]): Retrieved chunks with raw scores.
-
-        Returns:
-            Dict[str, float]: Mapping of chunk_id to normalized score.
-        """
         if not results:
             return {}
 
@@ -140,42 +138,13 @@ class HybridRetriever:
         }
 
     def _get_dynamic_weights(self, query: str):
-        """
-        Determine adaptive fusion weights based on query characteristics.
-        Heuristic logic:
-            - Numeric-heavy queries → favor BM25
-            - Short queries → moderately favor BM25
-            - Default → use configured weights
-
-        Parameters:
-            query (str): User query string.
-
-        Returns:
-            Tuple[float, float]: (bm25_weight, vector_weight)
-        """
         if any(char.isdigit() for char in query):
-            return 0.7, 0.3  # BM25 heavy
+            return 0.7, 0.3
         if len(query.split()) <= 3:
             return 0.6, 0.4
         return self.bm25_weight, self.vector_weight
 
     def _validate_filters(self, results, filters):
-        """
-        Enforce strict metadata filter validation to prevent leakage.
-
-        Ensures that all retrieved chunks comply with the
-        requested metadata filters (e.g., document title).
-
-        This acts as a secondary safety layer in addition
-        to database-level filtering.
-
-        Parameters:
-            results (List[RetrievedChunk]): Final retrieved results.
-            filters (Dict[str, Any]): Applied metadata filters.
-
-        Raises:
-            RegulatoryRAGException: If any result violates filters.
-    """
         if not filters:
             return
 
@@ -183,12 +152,7 @@ class HybridRetriever:
 
         for r in results:
             if title_filter and r.source != title_filter:
-                log.error(
-                    "metadata_leak_detected",
-                    chunk_id=r.chunk_id,
-                    expected=title_filter,
-                    actual=r.source,
-                )
+                log.error("metadata_leak_detected")
                 raise RegulatoryRAGException(
                     "Strict metadata filter violation detected."
                 )
@@ -198,27 +162,6 @@ class HybridRetriever:
     # -------------------------------------------------
 
     async def _bm25_node(self, state: RetrievalState):
-        """
-        Execute BM25 full-text search retrieval.
-
-        Performs PostgreSQL text search using `ts_rank_cd`
-        with strict metadata filtering.
-
-        Execution characteristics:
-            - Async execution
-            - Timeout protected
-            - Graceful fallback on failure
-            - Structured logging
-
-        Parameters:
-            state (RetrievalState): Current retrieval state.
-
-        Returns:
-            Dict containing:
-                {
-                    "bm25_results": List[RetrievedChunk]
-                }
-        """
         async def _run():
             conn = await self._get_conn()
             try:
@@ -227,16 +170,15 @@ class HybridRetriever:
 
                 rows = await conn.fetch(
                     """
-                    SELECT
-                        c.id::text AS chunk_id,
-                        c.document_id::text,
-                        c.content,
-                        ts_rank_cd(
-                            to_tsvector('english', c.content),
-                            plainto_tsquery('english', $1)
-                        ) AS score,
-                        d.title AS source,
-                        c.metadata
+                    SELECT c.id::text AS chunk_id,
+                           c.document_id::text,
+                           c.content,
+                           ts_rank_cd(
+                               to_tsvector('english', c.content),
+                               plainto_tsquery('english', $1)
+                           ) AS score,
+                           d.title AS source,
+                           c.metadata
                     FROM public.chunks c
                     JOIN public.documents d ON d.id = c.document_id
                     WHERE to_tsvector('english', c.content)
@@ -266,52 +208,17 @@ class HybridRetriever:
             finally:
                 await conn.close()
 
-        try:
-            result = await asyncio.wait_for(
-                _run(), timeout=self.bm25_timeout
-            )
-            log.info("bm25_completed", count=len(result["bm25_results"]))
-            return result
-
-        except asyncio.TimeoutError:
-            log.warning("bm25_timeout")
-            return {"bm25_results": []}
-
-        except Exception as e:
-            log.error("bm25_failed", error=str(e))
-            return {"bm25_results": []}
+        return await asyncio.wait_for(_run(), timeout=self.bm25_timeout)
 
     # -------------------------------------------------
-    # Vector Node
+    # Vector Node (UPDATED)
     # -------------------------------------------------
 
     async def _vector_node(self, state: RetrievalState):
-        """
-        Execute dense vector similarity retrieval using pgvector.
-
-        Steps:
-            1. Embed query using configured embedder
-            2. Perform similarity search using cosine distance
-            3. Apply strict metadata filtering
-            4. Return top-k candidates
-
-        Execution characteristics:
-            - Async execution
-            - Timeout protected
-            - Graceful fallback on failure
-            - Structured logging
-
-        Parameters:
-            state (RetrievalState): Current retrieval state.
-
-        Returns:
-            Dict containing:
-                {
-                    "vector_results": List[RetrievedChunk]
-                }
-        """
         async def _run():
-            embedding = await self.embedder.embed_query(state.user_query)
+            expanded_query = self._expand_query(state.user_query)
+
+            embedding = await self.embedder.embed_query(expanded_query)
             vector_literal = "[" + ",".join(map(str, embedding)) + "]"
 
             filters = state.filters or {}
@@ -321,13 +228,12 @@ class HybridRetriever:
             try:
                 rows = await conn.fetch(
                     """
-                    SELECT
-                        c.id::text AS chunk_id,
-                        c.document_id::text,
-                        c.content,
-                        1 - (c.embedding <=> $1::vector) AS score,
-                        d.title AS source,
-                        c.metadata
+                    SELECT c.id::text AS chunk_id,
+                           c.document_id::text,
+                           c.content,
+                           1 - (c.embedding <=> $1::vector) AS score,
+                           d.title AS source,
+                           c.metadata
                     FROM public.chunks c
                     JOIN public.documents d ON d.id = c.document_id
                     WHERE c.embedding IS NOT NULL
@@ -356,54 +262,15 @@ class HybridRetriever:
             finally:
                 await conn.close()
 
-        try:
-            result = await asyncio.wait_for(
-                _run(), timeout=self.vector_timeout
-            )
-            log.info("vector_completed", count=len(result["vector_results"]))
-            return result
-
-        except asyncio.TimeoutError:
-            log.warning("vector_timeout")
-            return {"vector_results": []}
-
-        except Exception as e:
-            log.error("vector_failed", error=str(e))
-            return {"vector_results": []}
+        return await asyncio.wait_for(_run(), timeout=self.vector_timeout)
 
     # -------------------------------------------------
-    # Fusion Node
+    # Fusion Node (UPDATED)
     # -------------------------------------------------
 
     def _fusion_node(self, state: RetrievalState):
-        """
-        Perform score-level hybrid fusion of BM25 and vector results.
-
-        Fusion process:
-            1. Min-max normalize scores independently
-            2. Apply dynamic query-adaptive weights
-            3. Compute weighted linear combination
-            4. Sort and select top_k results
-
-        This replaces rank-based fusion (RRF) with
-        calibrated score-level hybrid retrieval.
-
-        Parameters:
-            state (RetrievalState): Retrieval state containing
-                                    bm25_results and vector_results.
-
-        Returns:
-            Dict containing:
-                {
-                    "fused_results": List[RetrievedChunk]
-                }
-        """
         bm25_results = state.bm25_results or []
         vector_results = state.vector_results or []
-
-        if not bm25_results and not vector_results:
-            log.warning("both_retrievers_empty")
-            return {"fused_results": []}
 
         bm25_norm = self._min_max_normalize(bm25_results)
         vector_norm = self._min_max_normalize(vector_results)
@@ -417,10 +284,20 @@ class HybridRetriever:
             all_chunks[r.chunk_id] = r
 
         for chunk_id, chunk in all_chunks.items():
+
             score = (
                 bm25_w * bm25_norm.get(chunk_id, 0.0)
                 + vector_w * vector_norm.get(chunk_id, 0.0)
             )
+
+            # Section boost
+            if chunk.metadata.get("section"):
+                score += 0.1
+
+            # Annex penalty
+            if "annex" in str(chunk.metadata.get("section_title", "")).lower():
+                score -= 0.05
+
             final_scores[chunk_id] = score
 
         fused = sorted(
@@ -429,38 +306,13 @@ class HybridRetriever:
             reverse=True,
         )[: self.top_k]
 
-        log.info(
-            "fusion_completed_v2",
-            bm25=len(bm25_results),
-            vector=len(vector_results),
-            fused=len(fused),
-            bm25_weight=bm25_w,
-            vector_weight=vector_w,
-        )
-
         return {"fused_results": fused}
 
     # -------------------------------------------------
-    # Graph Wiring
+    # Graph
     # -------------------------------------------------
 
     def _build_graph(self):
-        """
-        Construct and compile the LangGraph retrieval pipeline.
-
-        Graph Structure:
-            START
-            ├── BM25 Node
-            ├── Vector Node
-            ↓
-            Fusion Node
-
-        Both retrieval nodes execute in parallel.
-        Fusion executes after both complete.
-
-        Returns:
-            Compiled LangGraph instance.
-        """
         graph = StateGraph(RetrievalState)
 
         graph.add_node("bm25", self._bm25_node)
@@ -484,29 +336,30 @@ class HybridRetriever:
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[RetrievedChunk]:
         """
-        Execute the full hybrid retrieval pipeline.
+        Executes hybrid retrieval pipeline and returns structured chunks.
 
-        Pipeline:
-            1. Parallel BM25 + Vector retrieval
-            2. Score-level fusion
-            3. Strict metadata validation
-            4. Optional reranking
-            5. Return top_k results
+        Pipeline steps:
+            1. Parallel BM25 + vector retrieval
+            2. Score normalization and weighted fusion
+            3. Optional reranking (if enabled)
+            4. Metadata validation (strict filtering)
 
-        Parameters:
-            query (str): User query string.
-            filters (Optional[Dict[str, Any]]): Metadata filters
-                                            (e.g., title).
+        Guarantees:
+            - Always returns List[RetrievedChunk]
+            - No dict leakage (ensures type consistency for downstream pipeline)
+
+        Args:
+            query (str): User query.
+            filters (Optional[Dict[str, Any]]): Metadata filters (e.g., document title).
 
         Returns:
-            List[RetrievedChunk]: Final ranked retrieval results.
+            List[RetrievedChunk]: Ranked and filtered chunks.
 
         Raises:
-            RegulatoryRAGException: If pipeline fails or filter
-                                    violation is detected.
+            RegulatoryRAGException: If retrieval fails.
         """
 
-        log.info("retrieval_started", has_filters=bool(filters))
+        log.info("retrieval_started")
 
         try:
             state = RetrievalState(
@@ -516,19 +369,31 @@ class HybridRetriever:
 
             final_state = await self.graph.ainvoke(state)
 
-            results = final_state.get("fused_results", [])
+            raw_results = final_state.get("fused_results") or []
 
-            # Strict leakage validation
+            # -------------------------------------------------
+            # Defensive normalization (important)
+            # -------------------------------------------------
+            results: List[RetrievedChunk] = [
+                r if isinstance(r, RetrievedChunk) else RetrievedChunk(**r)
+                for r in raw_results
+            ]
+
+            # Validate filters (safety)
             self._validate_filters(results, filters)
 
-            # Optional reranking hook
+            # Optional reranking
             if self.reranker and results:
-                results = await self.reranker.rerank(query, results)
+                results = self.reranker.rerank(query, results)
 
-            log.info("retrieval_completed", result_count=len(results))
+            log.info(
+                "retrieval_completed",
+                result_count=len(results),
+                sample_ids=[r.chunk_id for r in results[:3]],
+            )
 
             return results
 
         except Exception as e:
-            log.error("retrieval_pipeline_failed", error=str(e))
+            log.error("retrieval_failed", error=str(e))
             raise RegulatoryRAGException(e)
