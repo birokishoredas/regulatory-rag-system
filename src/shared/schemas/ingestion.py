@@ -10,7 +10,6 @@ class IngestionConfig(BaseModel):
     chunk_size: int = 1000
     chunk_overlap: int = 200
     max_chunk_size: int = 2000
-    use_semantic_chunking: bool = True
 
 
 # ------------------------------------------------------------------
