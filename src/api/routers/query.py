@@ -1,8 +1,10 @@
 from fastapi import APIRouter, HTTPException, Request, status
 import json
+import asyncio
 
-from src.pipelines.rag_pipeline import RAGPipeline
-from utils.models import QueryRequest
+from src.core.pipeline.rag_pipeline import RAGPipeline
+from src.core.evaluation.evaluator import RAGEvaluator
+from src.shared.schemas import QueryRequest
 from logger import GLOBAL_LOGGER as log
 from exception.custom_exception import RegulatoryRAGException
 
@@ -14,27 +16,61 @@ router = APIRouter(
 # Singleton pipeline
 rag_pipeline = RAGPipeline()
 
+# Singleton evaluator (important: avoid reloading models)
+evaluator = RAGEvaluator()
+
+
+# -------------------------------------------------
+# Background Evaluation Task
+# -------------------------------------------------
+
+async def _run_evaluation_background(query: str, filters: dict, result: dict):
+    """
+    Runs evaluation asynchronously without blocking API response.
+
+    This executes:
+        - grounding score
+        - LLM judge
+        - optional RAGAS
+        - DB logging
+
+    Failures are logged but do NOT affect API response.
+    """
+
+    try:
+        await evaluator.evaluate_sample(
+            query=query,
+            filters=filters,
+            result=result
+        )
+
+        log.info("background_evaluation_completed")
+
+    except Exception as e:
+        log.warning(
+            "background_evaluation_failed",
+            error=str(e),
+        )
+
+
+# -------------------------------------------------
+# Query Endpoint
+# -------------------------------------------------
 
 @router.post("/query")
 async def query_rag(request: Request):
     """
     Handles RAG-based question answering requests.
 
-    Accepts flexible input formats (JSON or form data), validates the request,
-    enforces document selection, and returns an answer with citations.
-
-    Args:
-        request (Request): Incoming HTTP request containing query payload.
+    Enhancements:
+        - Returns answer immediately
+        - Triggers async evaluation in background
+        - Stores evaluation results in DB
 
     Returns:
-        Dict[str, Any]:
-            - answer (str): Generated answer.
-            - citations (List[Dict]): Supporting document chunks.
-
-    Raises:
-        HTTPException:
-            - 422: If request validation fails.
-            - 500: If RAG pipeline execution fails.
+        Dict:
+            - answer
+            - citations
     """
 
     payload = {}
@@ -86,7 +122,7 @@ async def query_rag(request: Request):
         }
 
     # ------------------------------
-    # Run RAG pipeline
+    # Run RAG pipeline (FAST PATH)
     # ------------------------------
     try:
         result = await rag_pipeline.run(
@@ -94,9 +130,31 @@ async def query_rag(request: Request):
             filters=qreq.filters,
         )
 
+        answer = result.get("answer")
+        raw_citations = result.get("citations", [])
+
+        # -------------------------------------------------
+        # Convert to dict for API response
+        # -------------------------------------------------
+        citations = [
+            c.model_dump() if hasattr(c, "model_dump") else c
+            for c in raw_citations
+        ]
+
+        # ------------------------------
+        # Trigger async evaluation
+        # ------------------------------
+        asyncio.create_task(
+            _run_evaluation_background(
+                query=qreq.question,
+                filters=qreq.filters,
+                result=result
+            )
+        )
+
         return {
-            "answer": result.get("answer"),
-            "citations": result.get("citations", []),
+            "answer": answer,
+            "citations": citations,
         }
 
     except RegulatoryRAGException as e:
