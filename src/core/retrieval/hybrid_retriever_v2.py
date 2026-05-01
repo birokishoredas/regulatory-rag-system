@@ -95,14 +95,17 @@ class HybridRetriever:
             str: Expanded query.
         """
         return f"""
-        {query}
+            {query}
 
-        Related concepts:
-        - definitions
-        - requirements
-        - thresholds
-        - conditions
-        """
+            Regulatory intent:
+            - scope
+            - applicability
+            - definitions
+            - requirements
+            - conditions
+            - approval criteria
+            - system description
+            """
 
     # -------------------------------------------------
     # DB Helpers
@@ -162,36 +165,92 @@ class HybridRetriever:
     # -------------------------------------------------
 
     async def _bm25_node(self, state: RetrievalState):
+        """
+        BM25 retrieval with dual-index awareness.
+
+        Retrieves:
+            - Paragraph chunks (fine-grained, higher volume)
+            - Section chunks (coarse context, lower volume)
+
+        Fixes:
+            - Removes parameterized LIMIT (asyncpg issue)
+            - Cleans parameter binding
+        """
+
         async def _run():
             conn = await self._get_conn()
             try:
                 filters = state.filters or {}
                 title_filter = filters.get("title")
 
-                rows = await conn.fetch(
-                    """
+                # --------------------------------------------
+                # Limits (SAFE - inline, not parameterized)
+                # --------------------------------------------
+                paragraph_limit = max(1, int(self.bm25_k * 0.7))
+                section_limit = max(1, int(self.bm25_k * 0.3))
+
+                # --------------------------------------------
+                # Paragraph chunks (PRIMARY)
+                # --------------------------------------------
+                paragraph_rows = await conn.fetch(
+                    f"""
                     SELECT c.id::text AS chunk_id,
-                           c.document_id::text,
-                           c.content,
-                           ts_rank_cd(
-                               to_tsvector('english', c.content),
-                               plainto_tsquery('english', $1)
-                           ) AS score,
-                           d.title AS source,
-                           c.metadata
+                        c.document_id::text,
+                        c.content,
+                        ts_rank_cd(
+                            to_tsvector('english', c.content),
+                            plainto_tsquery('english', $1)
+                        ) AS score,
+                        d.title AS source,
+                        c.metadata
                     FROM public.chunks c
                     JOIN public.documents d ON d.id = c.document_id
                     WHERE to_tsvector('english', c.content)
-                          @@ plainto_tsquery('english', $1)
-                      AND ($2::text IS NULL OR d.title = $2)
+                        @@ plainto_tsquery('english', $1)
+                    AND ($2::text IS NULL OR d.title = $2)
+                    AND c.metadata->>'chunk_type' = 'paragraph'
                     ORDER BY score DESC
-                    LIMIT $3;
+                    LIMIT {paragraph_limit};
                     """,
                     state.user_query,
                     title_filter,
-                    self.bm25_k,
                 )
 
+                # --------------------------------------------
+                # Section chunks (CONTEXT)
+                # --------------------------------------------
+                section_rows = await conn.fetch(
+                    f"""
+                    SELECT c.id::text AS chunk_id,
+                        c.document_id::text,
+                        c.content,
+                        ts_rank_cd(
+                            to_tsvector('english', c.content),
+                            plainto_tsquery('english', $1)
+                        ) AS score,
+                        d.title AS source,
+                        c.metadata
+                    FROM public.chunks c
+                    JOIN public.documents d ON d.id = c.document_id
+                    WHERE to_tsvector('english', c.content)
+                        @@ plainto_tsquery('english', $1)
+                    AND ($2::text IS NULL OR d.title = $2)
+                    AND c.metadata->>'chunk_type' = 'section'
+                    ORDER BY score DESC
+                    LIMIT {section_limit};
+                    """,
+                    state.user_query,
+                    title_filter,
+                )
+
+                # --------------------------------------------
+                # Merge
+                # --------------------------------------------
+                rows = paragraph_rows + section_rows
+
+                # --------------------------------------------
+                # Convert to RetrievedChunk
+                # --------------------------------------------
                 return {
                     "bm25_results": [
                         RetrievedChunk(
@@ -205,17 +264,31 @@ class HybridRetriever:
                         for r in rows
                     ]
                 }
+
             finally:
                 await conn.close()
 
         return await asyncio.wait_for(_run(), timeout=self.bm25_timeout)
 
     # -------------------------------------------------
-    # Vector Node (UPDATED)
+    # Vector Node
     # -------------------------------------------------
 
     async def _vector_node(self, state: RetrievalState):
+        """
+        Dense vector retrieval with dual-index awareness.
+
+        Retrieves:
+            - Paragraph chunks (fine-grained, higher volume)
+            - Section chunks (coarse context, lower volume)
+
+        Uses query expansion for better semantic recall.
+        """
+
         async def _run():
+            # --------------------------------------------
+            # Query expansion (existing behavior)
+            # --------------------------------------------
             expanded_query = self._expand_query(state.user_query)
 
             embedding = await self.embedder.embed_query(expanded_query)
@@ -226,26 +299,61 @@ class HybridRetriever:
 
             conn = await self._get_conn()
             try:
-                rows = await conn.fetch(
+                # --------------------------------------------
+                # Paragraph chunks (PRIMARY)
+                # --------------------------------------------
+                paragraph_limit = int(self.vector_k * 0.7)
+                paragraph_rows = await conn.fetch(
                     """
                     SELECT c.id::text AS chunk_id,
-                           c.document_id::text,
-                           c.content,
-                           1 - (c.embedding <=> $1::vector) AS score,
-                           d.title AS source,
-                           c.metadata
+                        c.document_id::text,
+                        c.content,
+                        1 - (c.embedding <=> $1::vector) AS score,
+                        d.title AS source,
+                        c.metadata
                     FROM public.chunks c
                     JOIN public.documents d ON d.id = c.document_id
                     WHERE c.embedding IS NOT NULL
-                      AND ($2::text IS NULL OR d.title = $2)
+                    AND ($2::text IS NULL OR d.title = $2)
+                    AND c.metadata->>'chunk_type' = 'paragraph'
                     ORDER BY c.embedding <=> $1::vector
                     LIMIT $3;
                     """,
                     vector_literal,
                     title_filter,
-                    self.vector_k,
+                    paragraph_limit,
                 )
 
+                # --------------------------------------------
+                # Section chunks (CONTEXT)
+                # --------------------------------------------
+                section_limit = max(3, int(self.vector_k * 0.3))
+                section_rows = await conn.fetch(
+                    """
+                    SELECT c.id::text AS chunk_id,
+                        c.document_id::text,
+                        c.content,
+                        1 - (c.embedding <=> $1::vector) AS score,
+                        d.title AS source,
+                        c.metadata
+                    FROM public.chunks c
+                    JOIN public.documents d ON d.id = c.document_id
+                    WHERE c.embedding IS NOT NULL
+                    AND ($2::text IS NULL OR d.title = $2)
+                    AND c.metadata->>'chunk_type' = 'section'
+                    ORDER BY c.embedding <=> $1::vector
+                    LIMIT $3;
+                    """,
+                    vector_literal,
+                    title_filter,
+                    section_limit,
+                )
+
+                rows = paragraph_rows + section_rows
+
+                # --------------------------------------------
+                # Convert to RetrievedChunk
+                # --------------------------------------------
                 return {
                     "vector_results": [
                         RetrievedChunk(
@@ -259,6 +367,7 @@ class HybridRetriever:
                         for r in rows
                     ]
                 }
+
             finally:
                 await conn.close()
 
@@ -269,44 +378,107 @@ class HybridRetriever:
     # -------------------------------------------------
 
     def _fusion_node(self, state: RetrievalState):
+        """
+        Dual-index aware fusion node.
+
+        Enhancements:
+            - Combines BM25 + vector scores (normalized)
+            - Applies chunk-type aware scoring:
+                • Section chunks → context boost
+                • Paragraph chunks → precision baseline
+            - Penalizes annex sections
+            - Enforces diversity across sections
+        """
+
         bm25_results = state.bm25_results or []
         vector_results = state.vector_results or []
 
+        # --------------------------------------------
+        # Normalize scores
+        # --------------------------------------------
         bm25_norm = self._min_max_normalize(bm25_results)
         vector_norm = self._min_max_normalize(vector_results)
 
         bm25_w, vector_w = self._get_dynamic_weights(state.user_query)
 
+        # --------------------------------------------
+        # Merge results
+        # --------------------------------------------
         all_chunks: Dict[str, RetrievedChunk] = {}
         final_scores = {}
 
         for r in bm25_results + vector_results:
             all_chunks[r.chunk_id] = r
 
+        # --------------------------------------------
+        # Scoring
+        # --------------------------------------------
         for chunk_id, chunk in all_chunks.items():
 
-            score = (
+            base_score = (
                 bm25_w * bm25_norm.get(chunk_id, 0.0)
                 + vector_w * vector_norm.get(chunk_id, 0.0)
             )
 
-            # Section boost
-            if chunk.metadata.get("section"):
-                score += 0.1
+            chunk_type = chunk.metadata.get("chunk_type")
 
-            # Annex penalty
-            if "annex" in str(chunk.metadata.get("section_title", "")).lower():
-                score -= 0.05
+            # ----------------------------------------
+            # Chunk-type aware scoring
+            # ----------------------------------------
+            if chunk_type == "section":
+                base_score += 0.15   # context boost
 
-            final_scores[chunk_id] = score
+            elif chunk_type == "paragraph":
+                base_score += 0.0    # neutral
 
-        fused = sorted(
+            # ----------------------------------------
+            # Annex penalty (existing logic, improved)
+            # ----------------------------------------
+            section_title = str(chunk.metadata.get("section_title", "")).lower()
+            if "condition" in section_title or "exception" in section_title:
+                base_score -= 0.2
+
+            if "annex" in section_title:
+                base_score -= 0.05
+
+            final_scores[chunk_id] = base_score
+
+        # --------------------------------------------
+        # Sort
+        # --------------------------------------------
+        ranked = sorted(
             all_chunks.values(),
             key=lambda r: final_scores[r.chunk_id],
             reverse=True,
-        )[: self.top_k]
+        )
 
-        return {"fused_results": fused}
+        # --------------------------------------------
+        # Diversity enforcement (VERY IMPORTANT)
+        # Avoid same-section flooding
+        # --------------------------------------------
+        seen_sections = set()
+        final_results = []
+
+        for r in ranked:
+            section = r.metadata.get("section")
+
+            # Allow first few freely
+            if len(final_results) < 3:
+                final_results.append(r)
+                if section:
+                    seen_sections.add(section)
+                continue
+
+            # After that enforce diversity
+            if section not in seen_sections:
+                final_results.append(r)
+                if section:
+                    seen_sections.add(section)
+
+            if len(final_results) >= self.top_k:
+                break
+
+        return {"fused_results": final_results}
 
     # -------------------------------------------------
     # Graph
