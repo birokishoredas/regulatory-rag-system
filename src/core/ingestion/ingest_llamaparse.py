@@ -1,4 +1,5 @@
 import os
+import re
 import glob
 import json
 import hashlib
@@ -6,19 +7,19 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from dotenv import load_dotenv
-from src.chunking.chunker_llamaparse import create_chunker
-from src.embeddings.embedder import create_embedder
-from src.ingestion.cleaning import DocumentCleaner
-from utils.db_utils import (
-    initialize_database,
-    close_database,
+from src.core.chunking.chunker_llamaparse import create_chunker
+from src.infra.models.embedder import create_embedder
+from src.core.ingestion.cleaning import DocumentCleaner
+from src.infra.db.db_utils import (
+    init_db_pool,
+    close_db_pool,
     get_document_by_hash,
     get_document_by_source,
     delete_document_and_chunks,
 )
-from utils import db_utils
-from utils.models import IngestionConfig, IngestionResult, DocumentChunk, ChunkingConfig
-from src.parsing.llama_parser import LlamaDocumentParser
+from src.infra.db import db_utils
+from src.shared.schemas import IngestionConfig, IngestionResult, DocumentChunk, ChunkingConfig
+from src.core.parsing.llama_parser import LlamaDocumentParser
 from logger import GLOBAL_LOGGER as log
 from exception.custom_exception import RegulatoryRAGException
 
@@ -67,8 +68,7 @@ class DocumentIngestionPipeline:
         self.chunker_config = ChunkingConfig(
             chunk_size=config.chunk_size,
             chunk_overlap=config.chunk_overlap,
-            max_chunk_size=config.max_chunk_size,
-            use_semantic_splitting=config.use_semantic_chunking,
+            max_chunk_size=config.max_chunk_size
         )
 
         # Core components
@@ -98,7 +98,7 @@ class DocumentIngestionPipeline:
             return
 
         try:
-            await initialize_database()
+            await init_db_pool()
             self._initialized = True
 
             log.info("ingestion_pipeline_initialized")
@@ -122,7 +122,7 @@ class DocumentIngestionPipeline:
             return
 
         try:
-            await close_database()
+            await close_db_pool()
             self._initialized = False
 
             log.info("ingestion_pipeline_closed")
@@ -204,38 +204,52 @@ class DocumentIngestionPipeline:
     # ------------------------------------------------------------------
     # Core ingestion logic
     # ------------------------------------------------------------------
-
     async def _ingest_single_document(self, file_path: str) -> IngestionResult:
         """
-        Processes a single document through parsing, chunking, embedding, and storage.
+        Processes a single document using structure-aware parsing and dual-index chunking.
 
-        Args:
-            file_path (str): Path to the document file.
+        Enhancements:
+            - Uses structured parsing for regulatory documents
+            - Generates BOTH:
+                • Paragraph-level chunks (fine-grained retrieval)
+                • Section-level chunks (coarse contextual retrieval)
+            - Enables multi-granularity (dual-index) retrieval
+            - Falls back safely if structure extraction fails
 
         Returns:
-            IngestionResult: Result containing document ID, chunk count, and status.
-
-        Raises:
-            RegulatoryRAGException: If any step in ingestion fails.
+            IngestionResult
         """
 
         start_time = datetime.now()
 
         try:
-            # Parse document
-            content = await self.parser.parse(file_path)
+            # --------------------------------------------------
+            # STRUCTURED PARSING
+            # --------------------------------------------------
+            parsed = await self.parser.parse(
+                        file_path,
+                        return_both=True,
+                    )
+            content = parsed["content"]
+            sections = parsed["sections"]
 
-            # Title extraction
+            content = self._clean_content(content)
+
+            # Title
             title = self._extract_title(content, file_path)
 
             content = f"# {title}\n\n{content}"
 
+            # --------------------------------------------------
             # Metadata + hashing
+            # --------------------------------------------------
             source = os.path.relpath(file_path, self.documents_folder)
             metadata = self._extract_document_metadata(content, file_path)
             file_hash = self._compute_file_hash(content)
 
+            # --------------------------------------------------
             # Idempotency check
+            # --------------------------------------------------
             existing = await get_document_by_hash(file_hash)
 
             if existing:
@@ -249,20 +263,66 @@ class DocumentIngestionPipeline:
                     errors=[],
                 )
 
+            # --------------------------------------------------
             # Update existing document
+            # --------------------------------------------------
             existing_source = await get_document_by_source(source)
 
             if existing_source:
                 log.info("document_updated_existing_source", title=title)
                 await delete_document_and_chunks(existing_source["id"])
 
-            # Chunking
-            chunks = await self.chunker.chunk_document(
+            # --------------------------------------------------
+            # PARAGRAPH CHUNKS (PRIMARY - REGULATORY)
+            # --------------------------------------------------
+            paragraph_chunks = await self.chunker.chunk_document(
                 content=content,
+                sections=sections,
                 title=title,
                 source=source,
                 metadata=metadata,
             )
+
+            # Ensure chunk_type is present (important for retrieval)
+            for c in paragraph_chunks:
+                c.metadata["chunk_type"] = "paragraph"
+
+            # --------------------------------------------------
+            # SECTION CHUNKS (NEW - DUAL INDEX)
+            # --------------------------------------------------
+            section_chunks: List[DocumentChunk] = []
+
+            if sections:
+                for i, section in enumerate(sections):
+
+                    section_text = f"""
+    Document: {title}
+    Section: {section.get('number', '')} - {section.get('title', '')}
+
+    {self._clean_content(section.get('content', ''))}
+    """.strip()
+
+                    section_chunks.append(
+                        DocumentChunk(
+                            content=section_text,
+                            index=10_000 + i,  # avoid index collision
+                            start_char=0,
+                            end_char=len(section_text),
+                            metadata={
+                                "title": title,
+                                "source": source,
+                                "section": section.get("number", ""),
+                                "section_title": section.get("title", ""),
+                                "chunk_type": "section",   
+                                **(metadata or {}),
+                            },
+                        )
+                    )
+
+            # --------------------------------------------------
+            # MERGE CHUNKS (DUAL INDEX READY)
+            # --------------------------------------------------
+            chunks = paragraph_chunks + section_chunks
 
             if not chunks:
                 log.warning("no_chunks_created", title=title)
@@ -275,9 +335,18 @@ class DocumentIngestionPipeline:
                     errors=["No chunks created"],
                 )
 
-            log.info("chunking_completed", title=title, chunk_count=len(chunks))
+            log.info(
+                "chunking_completed",
+                title=title,
+                total_chunks=len(chunks),
+                paragraph_chunks=len(paragraph_chunks),
+                section_chunks=len(section_chunks),
+                structured_used=bool(sections),
+            )
 
-            # Embedding
+            # --------------------------------------------------
+            # EMBEDDING
+            # --------------------------------------------------
             embedded_chunks = await self.embedder.embed_chunks(chunks)
 
             log.info(
@@ -286,7 +355,9 @@ class DocumentIngestionPipeline:
                 chunk_count=len(embedded_chunks),
             )
 
-            # Persistence
+            # --------------------------------------------------
+            # PERSISTENCE
+            # --------------------------------------------------
             document_id = await self._save_to_postgres(
                 title=title,
                 source=source,
@@ -317,11 +388,23 @@ class DocumentIngestionPipeline:
 
         except Exception as e:
             raise RegulatoryRAGException(e)
-
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    def _clean_content(self, text: str) -> str:
+        # Remove warning icons / UI artifacts
+        text = re.sub(r"⚠️.*?\n", "", text)
 
+        # Remove standalone labels
+        text = re.sub(r"Conditions\s*/\s*Exceptions", "", text, flags=re.IGNORECASE)
+
+        # Remove excessive symbols
+        text = re.sub(r"[■●►▶]+", "", text)
+
+        # Normalize whitespace
+        text = re.sub(r"\n{3,}", "\n\n", text)
+
+        return text.strip()
     def _find_document_files(self) -> List[str]:
         """
         Finds all supported document files in the documents folder.
