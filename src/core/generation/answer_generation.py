@@ -1,11 +1,11 @@
 from typing import List, Optional, Dict
 from langchain_core.messages import SystemMessage, HumanMessage
-from utils.models import RetrievedChunk, AnswerResult
-from src.prompts.prompt_library import (
+from src.shared.schemas import RetrievedChunk, AnswerResult
+from src.core.prompts.prompt_library import (
     ANSWER_SYSTEM_PROMPT,
     ANSWER_USER_PROMPT_TEMPLATE,
 )
-from utils.model_loader import ModelLoader
+from src.infra.models.model_loader import ModelLoader
 from logger import GLOBAL_LOGGER as log
 
 
@@ -46,22 +46,35 @@ class AnswerGenerator:
         previous_answer: Optional[str] = None
     ) -> AnswerResult:
         """
-        Generates an answer to a question using retrieved document chunks.
+        Generates a grounded answer using retrieved document chunks.
 
-        Enforces constraints such as:
-        - Single document grounding
-        - Context size limitation
-        - Strict prompt rules to avoid hallucination
+        Guarantees:
+            - Always returns AnswerResult
+            - Citations are always List[RetrievedChunk]
+            - No dict leakage (defensive normalization applied)
+
+        Constraints enforced:
+            - Single document grounding
+            - Context size limitation (token-safe)
+            - Strict anti-hallucination prompt rules
 
         Args:
             question (str): User query.
-            retrieved_chunks (List[RetrievedChunk]): Relevant chunks retrieved from documents.
-            chat_history (Optional[List[Dict]]): Prior conversation history.
-            previous_answer (Optional[str]): Previously generated answer for refinement.
+            retrieved_chunks (List[RetrievedChunk]): Retrieved chunks.
+            chat_history (Optional[List[Dict]]): Prior conversation.
+            previous_answer (Optional[str]): Previous answer for refinement.
 
         Returns:
-            AnswerResult: Generated answer along with associated citations.
+            AnswerResult: Generated answer with supporting chunks.
         """
+
+        # --------------------------------------------------
+        # Defensive normalization (important)
+        # --------------------------------------------------
+        retrieved_chunks: List[RetrievedChunk] = [
+            c if isinstance(c, RetrievedChunk) else RetrievedChunk(**c)
+            for c in (retrieved_chunks or [])
+        ]
 
         # --------------------------------------------------
         # Handle empty retrieval case
@@ -78,7 +91,7 @@ class AnswerGenerator:
             )
 
         # --------------------------------------------------
-        # HARD safety: enforce single document constraint
+        # Enforce single document constraint
         # --------------------------------------------------
         sources = {c.source for c in retrieved_chunks}
 
@@ -101,7 +114,7 @@ class AnswerGenerator:
         # --------------------------------------------------
         # TOKEN-SAFE CONTEXT LIMITER
         # --------------------------------------------------
-        MAX_CHARS = 8000  # Approximate safe threshold
+        MAX_CHARS = 8000
         total_chars = 0
         limited_chunks = []
 
@@ -113,7 +126,6 @@ class AnswerGenerator:
 
             limited_chunks.append(c)
 
-        # Ensure minimum context is preserved
         if not limited_chunks:
             limited_chunks = retrieved_chunks[:2]
 
@@ -162,21 +174,20 @@ class AnswerGenerator:
         ) + history_block + previous_answer_block
 
         # --------------------------------------------------
-        # Construct system prompt with strict rules
+        # Construct system prompt
         # --------------------------------------------------
         system_prompt = (
             ANSWER_SYSTEM_PROMPT
             + "\n\n"
             + f"""
-                IMPORTANT RULES (NON-NEGOTIABLE):
-                - You MUST answer using ONLY the document titled "{document_title}"
-                - Do NOT reference any other document
-                - If the answer is not present, say so clearly
-                - Do NOT guess or infer beyond the provided text
-                """
+            IMPORTANT RULES (NON-NEGOTIABLE):
+            - You MUST answer using ONLY the document titled "{document_title}"
+            - Do NOT reference any other document
+            - If the answer is not present, say so clearly
+            - Do NOT guess or infer beyond the provided text
+            """
         )
 
-        # Prepare LLM messages
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
