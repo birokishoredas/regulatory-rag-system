@@ -1,43 +1,46 @@
 from typing import List
 from sentence_transformers import CrossEncoder
 
-from utils.models import RetrievedChunk
+from src.shared.schemas import RetrievedChunk
 from logger import GLOBAL_LOGGER as log
 from exception.custom_exception import RegulatoryRAGException
 
 
 class CrossEncoderReranker:
     """
-    Reranks retrieved document chunks using a cross-encoder model.
+    Cross-encoder based reranker with structure-aware enhancements.
 
-    Uses a transformer-based cross-encoder to compute relevance scores
-    between a query and each chunk, improving retrieval quality.
+    Enhancements over base version:
+        - Incorporates metadata (section, title) into scoring
+        - Improves ranking for structured regulatory documents
+        - Optional score threshold filtering
+        - Robust fallback behavior
 
     Attributes:
-        model_name (str): Name of the cross-encoder model.
-        top_k (int): Number of top chunks to return after reranking.
-        min_score (float): Minimum score threshold (currently unused).
-        model (CrossEncoder): Loaded cross-encoder model instance.
+        model_name (str): Cross-encoder model name.
+        top_k (int): Number of top chunks to return.
+        min_score (float): Minimum score threshold (optional filtering).
+        model (CrossEncoder): Loaded model instance.
     """
 
     def __init__(
         self,
         model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
         top_k: int = 6,
-        min_score: float = 0,
+        min_score: float = 0.0,
         device: str = "cpu",
     ):
         """
-        Initializes the CrossEncoderReranker with the specified model.
+        Initialize reranker.
 
         Args:
-            model_name (str): HuggingFace model name for cross-encoder.
-            top_k (int): Number of top-ranked chunks to return.
-            min_score (float): Minimum score threshold for filtering (not enforced).
-            device (str): Device to load the model on ("cpu" or "cuda").
+            model_name (str): HuggingFace model name.
+            top_k (int): Number of results to return.
+            min_score (float): Optional score threshold.
+            device (str): "cpu" or "cuda".
 
         Raises:
-            RegulatoryRAGException: If model initialization fails.
+            RegulatoryRAGException: If model fails to load.
         """
 
         self.model_name = model_name
@@ -45,7 +48,6 @@ class CrossEncoderReranker:
         self.min_score = min_score
 
         try:
-            # Load cross-encoder model (uses transformers + torch)
             self.model = CrossEncoder(
                 model_name,
                 device=device,
@@ -55,14 +57,12 @@ class CrossEncoderReranker:
                 "reranker_initialized",
                 model=model_name,
                 top_k=top_k,
-                min_score=min_score,
                 device=device,
             )
 
         except Exception as e:
             log.error(
                 "reranker_initialization_failed",
-                model=model_name,
                 error=str(e),
             )
             raise RegulatoryRAGException(e)
@@ -77,18 +77,19 @@ class CrossEncoderReranker:
         chunks: List[RetrievedChunk],
     ) -> List[RetrievedChunk]:
         """
-        Reranks retrieved chunks based on relevance to the query.
+        Rerank chunks using cross-encoder scoring.
+
+        Guarantees:
+            - Always returns List[RetrievedChunk]
+            - No dict leakage (defensive normalization applied)
+            - Maintains metadata consistency
 
         Args:
             query (str): User query.
-            chunks (List[RetrievedChunk]): List of retrieved chunks.
+            chunks (List[RetrievedChunk]): Retrieved chunks.
 
         Returns:
-            List[RetrievedChunk]: Top-k reranked chunks sorted by relevance.
-
-        Notes:
-            - Falls back to original chunks if reranking fails.
-            - Always returns at most top_k chunks.
+            List[RetrievedChunk]: Top-k reranked chunks.
         """
 
         if not chunks:
@@ -100,20 +101,52 @@ class CrossEncoderReranker:
         )
 
         try:
-            # Create (query, chunk) pairs
-            pairs = [(query, c.content) for c in chunks]
+            # -------------------------------------------------
+            #  Defensive normalization (important)
+            # -------------------------------------------------
+            normalized_chunks: List[RetrievedChunk] = [
+                c if isinstance(c, RetrievedChunk) else RetrievedChunk(**c)
+                for c in chunks
+            ]
 
-            # Compute scores
+            # -------------------------------------------------
+            # Metadata-aware input construction
+            # -------------------------------------------------
+            pairs = []
+
+            for c in normalized_chunks:
+                section = c.metadata.get("section", "")
+                section_title = c.metadata.get("section_title", "")
+
+                enriched_text = f"""
+                {c.content}
+
+                Section: {section}
+                Title: {section_title}
+                """
+
+                pairs.append((query, enriched_text))
+
+            # -------------------------------------------------
+            # Score computation
+            # -------------------------------------------------
             scores = self.model.predict(pairs)
 
             reranked: List[RetrievedChunk] = []
 
-            for chunk, score in zip(chunks, scores):
+            for chunk, score in zip(normalized_chunks, scores):
 
+                score = float(score)
+
+                # Optional filtering
+                if score < self.min_score:
+                    continue
+
+                # Preserve metadata safely
                 metadata = dict(chunk.metadata or {})
                 metadata.update(
                     {
-                        "rerank_score": float(score),
+                        "rerank_score": score,
                         "reranked": True,
                     }
                 )
@@ -123,27 +156,33 @@ class CrossEncoderReranker:
                         chunk_id=chunk.chunk_id,
                         document_id=chunk.document_id,
                         content=chunk.content,
-                        score=float(score),
+                        score=score,
                         source=chunk.source,
                         metadata=metadata,
                     )
                 )
 
-            # Sort by score
+            # -------------------------------------------------
+            # Sort + select top_k
+            # -------------------------------------------------
             reranked.sort(key=lambda c: c.score, reverse=True)
 
-            # Always take top_k
-            final = reranked[: self.top_k]
+            min_chunks = max(3, self.top_k)
 
-            # SAFETY FALLBACK (critical)
+            final = reranked[:min_chunks]
+
+            # -------------------------------------------------
+            # Fallback safety
+            # -------------------------------------------------
             if not final:
                 log.warning("reranker_empty_fallback")
-                return chunks[: self.top_k]
+                return normalized_chunks[: self.top_k]
 
             log.info(
                 "reranking_completed",
-                input_chunks=len(chunks),
+                input_chunks=len(normalized_chunks),
                 output_chunks=len(final),
+                top_scores=[round(c.score, 3) for c in final[:3]],
             )
 
             return final
@@ -151,9 +190,11 @@ class CrossEncoderReranker:
         except Exception as e:
             log.error(
                 "reranking_failed",
-                input_chunks=len(chunks),
                 error=str(e),
             )
 
-            # HARD FALLBACK
-            return chunks[: self.top_k]
+            # Hard fallback (still safe)
+            return [
+                c if isinstance(c, RetrievedChunk) else RetrievedChunk(**c)
+                for c in chunks[: self.top_k]
+            ]
