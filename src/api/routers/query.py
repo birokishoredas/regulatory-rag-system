@@ -1,9 +1,6 @@
 from fastapi import APIRouter, HTTPException, Request, status
 import json
 import asyncio
-
-from src.core.pipeline.rag_pipeline import RAGPipeline
-from src.core.evaluation.evaluator import RAGEvaluator
 from src.shared.schemas import QueryRequest
 from logger import GLOBAL_LOGGER as log
 from exception.custom_exception import RegulatoryRAGException
@@ -13,18 +10,11 @@ router = APIRouter(
     tags=["RAG"],
 )
 
-# Singleton pipeline
-rag_pipeline = RAGPipeline()
-
-# Singleton evaluator (important: avoid reloading models)
-evaluator = RAGEvaluator()
-
-
 # -------------------------------------------------
 # Background Evaluation Task
 # -------------------------------------------------
 
-async def _run_evaluation_background(query: str, filters: dict, result: dict):
+async def _run_evaluation_background(evaluator, query: str, filters: dict, result: dict):
     """
     Runs evaluation asynchronously without blocking API response.
 
@@ -125,7 +115,7 @@ async def query_rag(request: Request):
     # Run RAG pipeline (FAST PATH)
     # ------------------------------
     try:
-        result = await rag_pipeline.run(
+        result = await request.app.state.rag_pipeline.run(
             query=qreq.question,
             filters=qreq.filters,
         )
@@ -146,6 +136,7 @@ async def query_rag(request: Request):
         # ------------------------------
         asyncio.create_task(
             _run_evaluation_background(
+                evaluator=request.app.state.evaluator,
                 query=qreq.question,
                 filters=qreq.filters,
                 result=result

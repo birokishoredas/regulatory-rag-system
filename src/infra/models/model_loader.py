@@ -15,7 +15,7 @@ class ModelLoader:
         load_dotenv()
         self._validate_env()
         self.config=load_config()
-        log.info("Configuration loaded successfully", config_keys=list(self.config.keys()))
+        log.debug("Configuration loaded successfully", config_keys=list(self.config.keys()))
 
     def _validate_env(self):
         """
@@ -28,12 +28,12 @@ class ModelLoader:
         if missing:
             log.error("Missing environment variables", missing_vars=missing)
             raise RegulatoryRAGException("Missing ennvironment variables", sys)
-        log.info("Environment variables validated", available_keys=[k for k in self.api_keys if self.api_keys[k]])
+        log.debug("Environment variables validated", available_keys=[k for k in self.api_keys if self.api_keys[k]])
 
     def load_embeddings(self):
         """Load and return the embedding model"""
         try:
-            log.info("Loading embedding model....")
+            log.debug("Loading embedding model....")
             model_name= self.config["embedding_model"]["model_name"]
             region= os.getenv("AWS_DEFAULT_REGION")
             return BedrockEmbeddings(model_id=model_name, region_name=region)
@@ -43,7 +43,7 @@ class ModelLoader:
     def load_llm(self):
         """Load and return the configured LLM Model"""
         llm_block= self.config["llm"]
-        log.info("Loading LLM...")
+        log.debug("Loading LLM...")
         provider_key= os.getenv("LLM_PROVIDER", "groq") #Default will be considered as groq
         if provider_key not in llm_block:
             log.error("LLM provider not found in config", provider_key=provider_key)
