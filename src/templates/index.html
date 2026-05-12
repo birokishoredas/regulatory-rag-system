@@ -206,7 +206,57 @@ win.appendChild(div);
 win.scrollTop = win.scrollHeight;
 
 }
+function formatAnswer(text){
 
+    // Split sections using markdown markers
+    const sections = text.split(/\*\*\d+\.\s*/).filter(Boolean);
+
+    let html = "";
+
+    for(const sec of sections){
+
+        if(sec.toLowerCase().includes("direct answer")){
+            html += `<div class="answer-section">
+                        <div class="section-title">📌 Direct Answer</div>
+                        <div>${escapeHtml(sec.replace(/direct answer/i,""))}</div>
+                     </div>`;
+        }
+
+        else if(sec.toLowerCase().includes("key details")){
+            const bullets = sec.split("-").slice(1);
+
+            html += `<div class="answer-section">
+                        <div class="section-title">📋 Key Details</div>
+                        <ul>`;
+
+            for(const b of bullets){
+                html += `<li>${escapeHtml(b.trim())}</li>`;
+            }
+
+            html += `</ul></div>`;
+        }
+
+        else if(sec.toLowerCase().includes("conditions")){
+            const bullets = sec.split("-").slice(1);
+
+            html += `<div class="answer-section warning">
+                        <div class="section-title">⚠️ Conditions / Exceptions</div>
+                        <ul>`;
+
+            for(const b of bullets){
+                html += `<li>${escapeHtml(b.trim())}</li>`;
+            }
+
+            html += `</ul></div>`;
+        }
+
+        else{
+            html += `<div>${escapeHtml(sec)}</div>`;
+        }
+    }
+
+    return html;
+}
 function appendAssistantMessage(text,citations){
 
 const win = document.getElementById("chat-window");
@@ -214,8 +264,10 @@ const win = document.getElementById("chat-window");
 const div = document.createElement("div");
 div.className = "chat-msg assistant";
 
+let formatted = formatAnswer(text);
+
 let html =
-`<div class="bubble">${escapeHtml(text)}</div>`;
+`<div class="bubble structured">${formatted}</div>`;
 
 if(citations && citations.length){
 
@@ -317,9 +369,8 @@ currentDoc = newDoc;
 
 restoreChat(newDoc);
 
-if(!threadByDoc[newDoc])
+// ALWAYS create new thread on doc change
 threadByDoc[newDoc] = uuid();
-
 threadIdEl.value = threadByDoc[newDoc];
 
 });
