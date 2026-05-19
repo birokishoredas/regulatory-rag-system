@@ -1,17 +1,17 @@
 from typing import Dict, Any, Optional
 from langgraph.graph import StateGraph, START
-from src.retrieval.hybrid_retriever_v2 import HybridRetriever
-from src.memory.conversation_store import ConversationStore
-from src.generation.answer_generation import AnswerGenerator
-from src.reranking.reranker import CrossEncoderReranker
-from utils.models import RAGState
-from utils.helper_functions import format_citations
+from src.core.retrieval.hybrid_retriever_v2 import HybridRetriever
+from src.core.memory.conversation_store import ConversationStore
+from src.core.generation.answer_generation import AnswerGenerator
+from src.core.reranking.reranker import CrossEncoderReranker
+from src.shared.schemas import RAGState
 from logger import GLOBAL_LOGGER as log
 from exception.custom_exception import RegulatoryRAGException
 import re
-from src.cache.cache_manager import LLMAnswerCacheManager
+from src.core.cache.cache_manager import LLMAnswerCacheManager
 from langsmith import traceable, get_current_run_tree
-from src.guardrails.guardrails import AnswerGuardrails
+from src.core.guardrails.guardrails import AnswerGuardrails
+from src.core.rewrite.query_rewriter import SafeQueryRewriter
 
 
 class RAGPipeline:
@@ -42,6 +42,7 @@ class RAGPipeline:
         self.retriever = HybridRetriever()
         self.reranker = CrossEncoderReranker(top_k=6)
         self.answer_generator = AnswerGenerator()
+        self.rewriter = SafeQueryRewriter(self.answer_generator.llm)
         self.graph = self._build_graph()
 
         log.info("rag_pipeline_initialized")
@@ -65,7 +66,7 @@ class RAGPipeline:
             Exception: If retrieval fails.
         """
         try:
-            query = f"{state.user_query} {state.rewritten_query or ''}".strip()
+            query = state.rewritten_query or state.user_query
 
             chunks = await self.retriever.retrieve(
                 query=query,
@@ -133,8 +134,8 @@ class RAGPipeline:
         )
 
         return {"reranked_chunks": reranked}
-
-    async def rewrite_node(self, state: RAGState) -> Dict[str, Any]:
+    
+    async def rewrite_node(self, state: RAGState):
         """
         Rewrites user query using chat history to improve retrieval quality.
 
@@ -143,113 +144,22 @@ class RAGPipeline:
 
         Returns:
             Dict[str, Any]: Rewritten query.
-        """
-
-        history = state.chat_history or []
-        query = state.user_query
-        current_doc = (state.filters or {}).get("title")
-
-        if not history:
-            return {"rewritten_query": query}
-
-        def strip_citations(text: str) -> str:
-            return re.sub(r"\[\d+\]", "", text)
-
-        cleaned_history = []
-        for h in history:
-            content = strip_citations(h["content"])
-
-            if current_doc and len(content) > 1000:
-                content = content[:1000]
-
-            cleaned_history.append({
-                "role": h["role"],
-                "content": content
-            })
-
-        history_text = "\n".join(
-            f"{h['role']}: {h['content']}" for h in cleaned_history
+            """
+        rewritten_query = await self.rewriter.rewrite(
+            query=state.user_query,
+            chat_history=state.chat_history
         )
 
-        previous_answer = ""
-        last_assistant_msgs = [
-            h["content"] for h in cleaned_history if h["role"] == "assistant"
-        ]
-        if last_assistant_msgs:
-            previous_answer = last_assistant_msgs[-1]
-
-        reference_keywords = ["paragraph", "section", "clause", "article"]
-        is_reference_query = any(k in query.lower() for k in reference_keywords)
-
-        vague_patterns = ["explain more", "elaborate", "more details", "explain it"]
-        is_vague = any(v in query.lower() for v in vague_patterns)
-
-        prompt = f"""
-            You are a query rewriting system for a retrieval engine.
-
-            Your task:
-            Convert the follow-up question into a COMPLETE, standalone, retrieval-optimized query.
-
-            STRICT RULES:
-            - Resolve references like "this", "that", "it"
-            - Include the SUBJECT from previous conversation
-            - Expand vague queries into descriptive queries
-            - Preserve domain-specific terms
-            - DO NOT shorten the query
-            - Output ONLY the rewritten query
-
-            Conversation:
-            {history_text}
-
-            Previous Answer:
-            {previous_answer}
-
-            Follow-up Question:
-            {query}
-
-            Rewritten Query:
-            """
-
-        try:
-            rewritten = await self.answer_generator.llm.ainvoke(prompt)
-            rewritten_query = rewritten.content.strip()
-
-            if not rewritten_query:
-                rewritten_query = query
-
-            if len(rewritten_query.split()) < 5:
-                rewritten_query = f"{query} {previous_answer[:200]}"
-
-            if is_reference_query and previous_answer:
-                rewritten_query = f"{rewritten_query} {previous_answer[:300]}"
-
-            if is_vague and previous_answer:
-                rewritten_query = f"Detailed explanation of {previous_answer[:300]}"
-
-            log.info(
-                "query_rewritten",
-                original=query,
-                rewritten=rewritten_query,
-                is_reference=is_reference_query,
-                is_vague=is_vague
-            )
-
-            return {"rewritten_query": rewritten_query}
-
-        except Exception as e:
-            log.error("rewrite_failed", error=str(e))
-            return {"rewritten_query": query}
+        return {"rewritten_query": rewritten_query}
 
     @traceable(name="Answer_Generation")
     async def answer_node(self, state: RAGState) -> Dict[str, Any]:
         """
         Generates final answer with validation, retry logic, and guardrails enforcement.
 
-        Args:
-            state (RAGState): Current pipeline state.
-
-        Returns:
-            Dict[str, Any]: Final answer and validated citations.
+        Fixes:
+            - Prevents reranker collapse (ensures minimum context)
+            - Adds fallback to retrieved chunks when reranker is too aggressive
         """
 
         attempts = [
@@ -257,15 +167,46 @@ class RAGPipeline:
             ("fallback", state.retrieved_chunks or []),
         ]
 
+        # --------------------------------------------------
+        # Prevent reranker collapse
+        # --------------------------------------------------
+        fixed_attempts = []
+
         for attempt_name, chunks in attempts:
 
             if not chunks:
                 continue
 
+            # If too few chunks → fallback to retrieved chunks
+            if len(chunks) < 3:
+                log.warning(
+                    "reranker_too_aggressive_fallback",
+                    attempt=attempt_name,
+                    original_count=len(chunks),
+                )
+
+                fallback_chunks = state.retrieved_chunks[:5] if state.retrieved_chunks else []
+
+                fixed_attempts.append((attempt_name, fallback_chunks))
+            else:
+                fixed_attempts.append((attempt_name, chunks))
+
+        # Replace attempts with fixed version
+        attempts = fixed_attempts
+
+        # --------------------------------------------------
+        # Answer generation loop
+        # --------------------------------------------------
+        for attempt_name, chunks in attempts:
+
             cited_chunks = []
 
             try:
-                log.info("answer_attempt_started", attempt=attempt_name, chunk_count=len(chunks))
+                log.info(
+                    "answer_attempt_started",
+                    attempt=attempt_name,
+                    chunk_count=len(chunks),
+                )
 
                 result = await self.answer_generator.generate(
                     question=state.user_query,
@@ -275,6 +216,9 @@ class RAGPipeline:
 
                 answer_text = result.answer
 
+                # --------------------------------------------
+                # Extract citations
+                # --------------------------------------------
                 citation_matches = re.findall(r"\[(\d+)\]", answer_text)
 
                 cited_indices = {
@@ -287,6 +231,9 @@ class RAGPipeline:
                     if 0 <= idx < len(chunks)
                 ]
 
+                # --------------------------------------------
+                # Guardrails
+                # --------------------------------------------
                 cited_chunks = self.guardrails.filter_citations(
                     raw_cited_chunks,
                     chunks,
@@ -317,6 +264,9 @@ class RAGPipeline:
                 )
                 continue
 
+        # --------------------------------------------------
+        # Final fallback
+        # --------------------------------------------------
         log.warning("all_attempts_failed", query=state.user_query)
 
         return {
@@ -360,20 +310,21 @@ class RAGPipeline:
         filters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Executes the full RAG pipeline for a given query.
+        Executes the full RAG pipeline and returns typed results.
 
-        Handles caching, conversation history, pipeline execution,
-        and persistence of results.
+        Key Improvements:
+            - Ensures citations remain as RetrievedChunk internally
+            - Avoids premature serialization (dict conversion)
+            - Keeps API layer responsible for output formatting
 
         Args:
             query (str): User query.
-            filters (Optional[Dict[str, Any]]): Retrieval filters (e.g., document title).
+            filters (Optional[Dict[str, Any]]): Retrieval filters.
 
         Returns:
-            Dict[str, Any]: Final response containing answer and citations.
-
-        Raises:
-            RegulatoryRAGException: If pipeline execution fails.
+            Dict[str, Any]:
+                - answer (str)
+                - citations (List[RetrievedChunk])  ← IMPORTANT CHANGE
         """
 
         log.info("rag_run_started", has_filters=bool(filters))
@@ -418,18 +369,11 @@ class RAGPipeline:
                 )
             )
 
-            raw_citations = format_citations(
-                final_state.get("citations", [])
-            )
-
-            safe_citations = [
-                c.model_dump() if hasattr(c, "model_dump") else c
-                for c in raw_citations
-            ]
+            citations = final_state.get("citations", [])
 
             response = {
                 "answer": final_state.get("answer"),
-                "citations": safe_citations,
+                "citations": citations,
             }
 
             if response["answer"] and not response["answer"].startswith(
@@ -439,7 +383,10 @@ class RAGPipeline:
                     await self.conversation_store.save_qa(
                         query=query,
                         answer=response["answer"],
-                        citations=response["citations"],
+                        citations=[
+                            c.model_dump() if hasattr(c, "model_dump") else c
+                            for c in citations
+                        ],
                         metadata={
                             "filters": filters,
                             "session_id": session_id,
@@ -449,7 +396,16 @@ class RAGPipeline:
                 except Exception as e:
                     log.error("conversation_store_save_failed", error=str(e))
 
-                await self.cache.set(cache_key, response)
+                await self.cache.set(
+                    cache_key,
+                    {
+                        "answer": response["answer"],
+                        "citations": [
+                            c.model_dump() if hasattr(c, "model_dump") else c
+                            for c in citations
+                        ],
+                    }
+                )
 
             log.info("rag_run_completed", document=current_doc)
 
