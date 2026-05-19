@@ -69,3 +69,29 @@ li{ padding:6px 0 }
     .main-grid{ grid-template-columns: 1fr; padding:12px }
     .chat-panel{ height:520px }
 }
+.structured {
+    line-height: 1.6;
+}
+
+.answer-section {
+    margin-bottom: 12px;
+}
+
+.section-title {
+    font-weight: 600;
+    margin-bottom: 6px;
+}
+
+.answer-section ul {
+    padding-left: 16px;
+}
+
+.answer-section li {
+    margin-bottom: 4px;
+}
+
+.answer-section.warning {
+    background: #fff7ed;
+    padding: 8px;
+    border-radius: 6px;
+}

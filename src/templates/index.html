@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>Regulatory RAG Chat</title>
+
 <link rel="stylesheet" href="/static/style.css">
 <script src="https://unpkg.com/htmx.org@1.9.2"></script>
 </head>
@@ -12,20 +13,42 @@
 
 <header class="topbar">
 <h1>📘 Regulatory RAG Chat</h1>
-<p class="muted">Ask regulatory questions and see source citations.</p>
+<p class="muted">
+Ask regulatory questions and see source citations + evaluation metrics.
+</p>
 </header>
 
 <main class="main-grid">
 
+<!-- ================================================= -->
+<!-- LEFT PANEL -->
+<!-- ================================================= -->
+
 <section class="panel">
+
 <h2>📂 Ingest Document</h2>
 
 <form id="ingest-form" action="/ingest">
-<input type="file" name="file" required />
+
+<input
+type="file"
+name="file"
+id="file-input"
+required
+/>
 
 <div class="row">
-<button type="submit" class="btn">Ingest</button>
+
+<button
+type="submit"
+class="btn"
+id="ingest-btn"
+>
+Ingest
+</button>
+
 <div id="ingest-result" class="inline-msg"></div>
+
 </div>
 
 </form>
@@ -33,13 +56,21 @@
 <hr />
 
 <h3>Documents</h3>
-<div id="documents-list">Loading…</div>
+
+<div id="documents-list">
+Loading…
+</div>
 
 </section>
+
+<!-- ================================================= -->
+<!-- CHAT PANEL -->
+<!-- ================================================= -->
 
 <section class="panel chat-panel">
 
 <div class="chat-header">
+
 <h2>💬 Chat</h2>
 
 <div class="controls">
@@ -49,11 +80,23 @@
 
 </div>
 
-<div id="chat-window" class="chat-window" aria-live="polite"></div>
+<div
+id="chat-window"
+class="chat-window"
+aria-live="polite"
+></div>
 
-<form id="query-form" class="query-form" action="/query">
+<form
+id="query-form"
+class="query-form"
+action="/query"
+>
 
-<input type="hidden" id="thread-id" name="thread_id" />
+<input
+type="hidden"
+id="thread-id"
+name="thread_id"
+/>
 
 <textarea
 name="question"
@@ -64,7 +107,10 @@ required
 ></textarea>
 
 <div class="row">
-<button type="submit" class="btn primary">Send</button>
+<button type="submit" class="btn primary">
+Send
+</button>
+
 <div id="query-status" class="inline-msg"></div>
 </div>
 
@@ -76,29 +122,33 @@ required
 
 <script>
 
-/* ------------------------------ */
-/* Thread ID Generator */
-/* ------------------------------ */
+/* ================================================= */
+/* UUID */
+/* ================================================= */
 
 function uuid(){
-    if (window.crypto && crypto.randomUUID)
+
+    if(window.crypto && crypto.randomUUID){
         return crypto.randomUUID();
-    return 'session-' + Math.random().toString(36).slice(2,10);
+    }
+
+    return "session-" + Math.random().toString(36).slice(2,10);
 }
 
-/* ------------------------------ */
-/* Global Chat State */
-/* ------------------------------ */
+/* ================================================= */
+/* Global State */
+/* ================================================= */
 
 let chatHistoryByDoc = {};
 let threadByDoc = {};
 let currentDoc = null;
 
-const threadIdEl = document.getElementById("thread-id");
+const threadIdEl =
+document.getElementById("thread-id");
 
-/* ------------------------------ */
-/* Document Loader */
-/* ------------------------------ */
+/* ================================================= */
+/* Refresh Documents */
+/* ================================================= */
 
 async function refreshDocuments(){
 
@@ -107,19 +157,28 @@ async function refreshDocuments(){
         const res = await fetch("/documents");
         const docs = await res.json();
 
-        const list = document.getElementById("documents-list");
-        const sel = document.getElementById("doc-filter");
+        const list =
+        document.getElementById("documents-list");
+
+        const sel =
+        document.getElementById("doc-filter");
 
         list.innerHTML = "";
         sel.innerHTML = "";
 
-        const allOpt = document.createElement("option");
+        const allOpt =
+        document.createElement("option");
+
         allOpt.value = "";
         allOpt.textContent = "All documents";
+
         sel.appendChild(allOpt);
 
         if(!docs || docs.length === 0){
-            list.innerHTML = "<p class='muted'>No documents</p>";
+
+            list.innerHTML =
+            "<p class='muted'>No documents</p>";
+
             return;
         }
 
@@ -130,19 +189,28 @@ async function refreshDocuments(){
             const li = document.createElement("li");
 
             li.innerHTML =
-            `<strong>${escapeHtml(d.title)}</strong>
-            <span class="muted">(${d.id || "—"})</span>`;
+            `
+            <strong>${escapeHtml(d.title)}</strong>
+            <span class="muted">
+            (${d.id || "—"})
+            </span>
+            `;
 
-            const del = document.createElement("button");
+            const del =
+            document.createElement("button");
 
             del.textContent = "Delete";
-            del.className = "btn small danger";
+
+            del.className =
+            "btn small danger";
+
             del.style.marginLeft = "10px";
 
             del.onclick = async ()=>{
 
-                if(!confirm(`Delete '${d.title}'?`))
+                if(!confirm(`Delete '${d.title}'?`)){
                     return;
+                }
 
                 const r = await fetch(
                     "/documents/" + encodeURIComponent(d.title),
@@ -150,364 +218,458 @@ async function refreshDocuments(){
                 );
 
                 if(r.ok){
-                    refreshDocuments();
-                    appendSystemMessage(`Deleted '${d.title}'`);
-                }else{
-                    appendSystemMessage("Delete failed");
-                }
 
+                    refreshDocuments();
+
+                    appendSystemMessage(
+                        `Deleted '${d.title}'`
+                    );
+
+                }else{
+
+                    appendSystemMessage(
+                        "Delete failed"
+                    );
+                }
             };
 
             li.appendChild(del);
             ul.appendChild(li);
 
-            const op = document.createElement("option");
+            const op =
+            document.createElement("option");
+
             op.value = d.title;
             op.textContent = d.title;
 
             sel.appendChild(op);
-
         }
 
         list.appendChild(ul);
 
-    }
-    catch(e){
-        document.getElementById("documents-list")
-        .innerHTML = "<p class='muted'>Error loading documents</p>";
-    }
+    }catch(e){
 
+        document.getElementById("documents-list")
+        .innerHTML =
+        "<p class='muted'>Error loading documents</p>";
+    }
 }
 
-/* ------------------------------ */
+/* ================================================= */
 /* Escape HTML */
-/* ------------------------------ */
+/* ================================================= */
 
 function escapeHtml(s){
-return (s+"").replace(/[&<>\\\"]/g,
-c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+    return (s+"").replace(
+        /[&<>\\"]/g,
+        c => ({
+            "&":"&amp;",
+            "<":"&lt;",
+            ">":"&gt;",
+            '"':"&quot;"
+        }[c])
+    );
 }
 
-/* ------------------------------ */
-/* Chat Functions */
-/* ------------------------------ */
+/* ================================================= */
+/* Chat Rendering */
+/* ================================================= */
 
 function appendUserMessage(text){
 
-const win = document.getElementById("chat-window");
+    const win =
+    document.getElementById("chat-window");
 
-const div = document.createElement("div");
-div.className = "chat-msg user";
+    const div =
+    document.createElement("div");
 
-div.innerHTML =
-`<div class="bubble">${escapeHtml(text)}</div>`;
+    div.className = "chat-msg user";
 
-win.appendChild(div);
-win.scrollTop = win.scrollHeight;
+    div.innerHTML =
+    `<div class="bubble">${escapeHtml(text)}</div>`;
 
+    win.appendChild(div);
+
+    win.scrollTop = win.scrollHeight;
 }
-function formatAnswer(text){
 
-    // Split sections using markdown markers
-    const sections = text.split(/\*\*\d+\.\s*/).filter(Boolean);
+function appendAssistantMessage(
+    text,
+    citations,
+    evaluation
+){
 
-    let html = "";
+    const win =
+    document.getElementById("chat-window");
 
-    for(const sec of sections){
+    const div =
+    document.createElement("div");
 
-        if(sec.toLowerCase().includes("direct answer")){
-            html += `<div class="answer-section">
-                        <div class="section-title">📌 Direct Answer</div>
-                        <div>${escapeHtml(sec.replace(/direct answer/i,""))}</div>
-                     </div>`;
+    div.className = "chat-msg assistant";
+
+    let html =
+    `<div class="bubble structured">`;
+
+    html += `
+    <div class="answer-text">
+        ${escapeHtml(text)}
+    </div>
+    `;
+
+    if(citations && citations.length){
+
+        html += `
+        <details class="citations">
+        <summary>📑 Citations</summary>
+        <ul>
+        `;
+
+        for(const c of citations){
+
+            const src =
+            c.source || "unknown";
+
+            const docid =
+            c.document_id || "unknown";
+
+            const chunk =
+            c.chunk_id || "unknown";
+
+            html += `
+            <li>
+                <strong>${escapeHtml(src)}</strong>
+
+                <br/>
+
+                Document ID:
+                <code>${escapeHtml(docid)}</code>
+
+                <br/>
+
+                Chunk ID:
+                <code>${escapeHtml(chunk)}</code>
+            </li>
+            `;
         }
 
-        else if(sec.toLowerCase().includes("key details")){
-            const bullets = sec.split("-").slice(1);
-
-            html += `<div class="answer-section">
-                        <div class="section-title">📋 Key Details</div>
-                        <ul>`;
-
-            for(const b of bullets){
-                html += `<li>${escapeHtml(b.trim())}</li>`;
-            }
-
-            html += `</ul></div>`;
-        }
-
-        else if(sec.toLowerCase().includes("conditions")){
-            const bullets = sec.split("-").slice(1);
-
-            html += `<div class="answer-section warning">
-                        <div class="section-title">⚠️ Conditions / Exceptions</div>
-                        <ul>`;
-
-            for(const b of bullets){
-                html += `<li>${escapeHtml(b.trim())}</li>`;
-            }
-
-            html += `</ul></div>`;
-        }
-
-        else{
-            html += `<div>${escapeHtml(sec)}</div>`;
-        }
+        html += `
+        </ul>
+        </details>
+        `;
     }
 
-    return html;
-}
-function appendAssistantMessage(text,citations){
+    if(evaluation){
 
-const win = document.getElementById("chat-window");
+        const grounding =
+        evaluation.grounding_score ?? 0;
 
-const div = document.createElement("div");
-div.className = "chat-msg assistant";
+        const groundingEmoji =
+        grounding > 0.8
+        ? "🟢"
+        : grounding > 0.5
+        ? "🟡"
+        : "🔴";
 
-let formatted = formatAnswer(text);
+        html += `
+        <details class="evaluation-box" open>
 
-let html =
-`<div class="bubble structured">${formatted}</div>`;
+        <summary>
+        📊 Evaluation Metrics
+        </summary>
 
-if(citations && citations.length){
+        <div class="metric-row">
+            ${groundingEmoji}
+            Grounding Score:
+            <strong>
+            ${Number(
+                evaluation.grounding_score || 0
+            ).toFixed(2)}
+            </strong>
+        </div>
 
-html += "<details class='citations'><summary>📑 Citations</summary><ul>";
+        <div class="metric-row">
+            🧠 Judge Score:
+            <strong>
+            ${Number(
+                evaluation.judge_score || 0
+            ).toFixed(2)}
+            / 5
+            </strong>
+        </div>
 
-for(const c of citations){
+        <div class="metric-row">
+            📚 Citation Score:
+            <strong>
+            ${Number(
+                evaluation.citation_score || 0
+            ).toFixed(2)}
+            </strong>
+        </div>
 
-const src =
-c.source || c["source"] || "unknown";
+        <div class="metric-row">
+            ⚡ Latency:
+            <strong>
+            ${evaluation.latency_ms || 0}
+            ms
+            </strong>
+        </div>
 
-const docid =
-c.document_id || c["document_id"] || "unknown";
+        <div class="metric-row">
+            🔖 Citations Used:
+            <strong>
+            ${evaluation.num_citations || 0}
+            </strong>
+        </div>
 
-const chunk =
-c.chunk_id || c["chunk_id"] || "unknown";
+        </details>
+        `;
+    }
 
-html +=
-`<li>
-<strong>${escapeHtml(src)}</strong>
-<br/>
-Document ID:
-<code>${escapeHtml(docid)}</code>
-<br/>
-Chunk ID:
-<code>${escapeHtml(chunk)}</code>
-</li>`;
+    html += `</div>`;
 
-}
+    div.innerHTML = html;
 
-html += "</ul></details>";
+    win.appendChild(div);
 
-}
-
-div.innerHTML = html;
-
-win.appendChild(div);
-win.scrollTop = win.scrollHeight;
-
+    win.scrollTop = win.scrollHeight;
 }
 
 function appendSystemMessage(text){
 
-const win = document.getElementById("chat-window");
+    const win =
+    document.getElementById("chat-window");
 
-const div = document.createElement("div");
-div.className = "chat-msg system";
+    const div =
+    document.createElement("div");
 
-div.innerHTML =
-`<div class="bubble muted">${escapeHtml(text)}</div>`;
+    div.className = "chat-msg system";
 
-win.appendChild(div);
-win.scrollTop = win.scrollHeight;
+    div.innerHTML =
+    `<div class="bubble muted">
+        ${escapeHtml(text)}
+    </div>`;
 
+    win.appendChild(div);
+
+    win.scrollTop = win.scrollHeight;
 }
 
-/* ------------------------------ */
+/* ================================================= */
 /* Save / Restore Chats */
-/* ------------------------------ */
+/* ================================================= */
 
 function saveCurrentChat(){
 
-if(!currentDoc) return;
+    if(!currentDoc){
+        return;
+    }
 
-const win = document.getElementById("chat-window");
+    const win =
+    document.getElementById("chat-window");
 
-chatHistoryByDoc[currentDoc] = win.innerHTML;
-
+    chatHistoryByDoc[currentDoc] =
+    win.innerHTML;
 }
 
 function restoreChat(doc){
 
-const win = document.getElementById("chat-window");
+    const win =
+    document.getElementById("chat-window");
 
-if(chatHistoryByDoc[doc]){
-
-win.innerHTML = chatHistoryByDoc[doc];
-
-}else{
-
-win.innerHTML = "";
-
+    if(chatHistoryByDoc[doc]){
+        win.innerHTML = chatHistoryByDoc[doc];
+    }else{
+        win.innerHTML = "";
+    }
 }
 
-}
-
-/* ------------------------------ */
+/* ================================================= */
 /* Document Change */
-/* ------------------------------ */
+/* ================================================= */
 
 document
 .getElementById("doc-filter")
-.addEventListener("change",function(){
+.addEventListener("change", function(){
 
-const newDoc = this.value;
+    const newDoc = this.value;
 
-saveCurrentChat();
+    saveCurrentChat();
 
-currentDoc = newDoc;
+    currentDoc = newDoc;
 
-restoreChat(newDoc);
+    restoreChat(newDoc);
 
-// ALWAYS create new thread on doc change
-threadByDoc[newDoc] = uuid();
-threadIdEl.value = threadByDoc[newDoc];
+    threadByDoc[newDoc] = uuid();
 
+    threadIdEl.value =
+    threadByDoc[newDoc];
 });
 
-/* ------------------------------ */
+/* ================================================= */
 /* Ingest */
-/* ------------------------------ */
+/* ================================================= */
 
 document
 .getElementById("ingest-form")
-.addEventListener("submit",function(ev){
+.addEventListener("submit", function(ev){
 
-ev.preventDefault();
+    ev.preventDefault();
 
-const form = ev.currentTarget;
-const fd = new FormData(form);
+    const form = ev.currentTarget;
 
-document.getElementById("ingest-result")
-.textContent = "Uploading...";
+    const fd = new FormData(form);
 
-fetch(form.action,{
-method:"POST",
-body:fd
-})
-.then(async r=>{
+    const fileInput =
+    document.getElementById("file-input");
 
-const data =
-await r.json().catch(()=>null);
+    const ingestBtn =
+    document.getElementById("ingest-btn");
 
-if(data && data.message){
+    /* Disable During Upload */
 
-document.getElementById("ingest-result")
-.textContent = data.message;
+    fileInput.disabled = true;
 
-refreshDocuments();
+    ingestBtn.disabled = true;
 
-}else{
+    ingestBtn.textContent = "Ingesting...";
 
-document.getElementById("ingest-result")
-.textContent = "Ingest completed";
+    document.getElementById("ingest-result")
+    .textContent = "Uploading...";
 
-refreshDocuments();
+    fetch(form.action, {
 
-}
+        method:"POST",
 
-})
-.catch(()=>{
+        body:fd
 
-document.getElementById("ingest-result")
-.textContent = "Upload failed";
+    })
+    .then(async r => {
 
+        const data =
+        await r.json().catch(()=>null);
+
+        if(data && data.message){
+
+            document.getElementById("ingest-result")
+            .textContent = data.message;
+
+        }else{
+
+            document.getElementById("ingest-result")
+            .textContent = "Ingest completed";
+        }
+
+        refreshDocuments();
+
+        /* Re-enable */
+
+        fileInput.disabled = false;
+
+        ingestBtn.disabled = false;
+
+        ingestBtn.textContent = "Ingest";
+
+    })
+    .catch(()=>{
+
+        document.getElementById("ingest-result")
+        .textContent = "Upload failed";
+
+        /* Re-enable On Error */
+
+        fileInput.disabled = false;
+
+        ingestBtn.disabled = false;
+
+        ingestBtn.textContent = "Ingest";
+
+    });
 });
 
-});
-
-/* ------------------------------ */
+/* ================================================= */
 /* Query */
-/* ------------------------------ */
+/* ================================================= */
 
 document
 .getElementById("query-form")
-.addEventListener("submit",function(ev){
+.addEventListener("submit", function(ev){
 
-ev.preventDefault();
+    ev.preventDefault();
 
-const q =
-document.getElementById("question-input").value;
+    const q =
+    document.getElementById("question-input").value;
 
-const filterSel =
-document.getElementById("doc-filter");
+    const filterSel =
+    document.getElementById("doc-filter");
 
-const selected = filterSel.value;
+    const selected = filterSel.value;
 
-if(!selected){
+    if(!selected){
 
-appendSystemMessage(
-"Please select a document before asking a question."
-);
+        appendSystemMessage(
+            "Please select a document before asking a question."
+        );
 
-return;
+        return;
+    }
 
-}
+    const payload = {
+        question:q,
+        thread_id:threadIdEl.value,
+        filters:{
+            title:selected
+        }
+    };
 
-const payload = {
-question:q,
-thread_id:threadIdEl.value,
-filters:{title:selected}
-};
+    appendUserMessage(q);
 
-appendUserMessage(q);
+    document.getElementById("query-status")
+    .textContent = "Thinking...";
 
-document.getElementById("query-status")
-.textContent = "Thinking...";
+    fetch("/query", {
 
-fetch("/query",{
+        method:"POST",
 
-method:"POST",
+        headers:{
+            "Content-Type":"application/json"
+        },
 
-headers:{
-"Content-Type":"application/json"
-},
+        body:JSON.stringify(payload)
 
-body:JSON.stringify(payload)
+    })
+    .then(async r => {
 
-})
-.then(async r=>{
+        const data = await r.json();
 
-const data = await r.json();
+        document.getElementById("query-status")
+        .textContent = "";
 
-document.getElementById("query-status")
-.textContent = "";
+        appendAssistantMessage(
+            data.answer || "(no answer)",
+            data.citations || [],
+            data.evaluation || null
+        );
 
-appendAssistantMessage(
-data.answer || "(no answer)",
-data.citations || []
-);
+    })
+    .catch(()=>{
 
-})
-.catch(()=>{
+        document.getElementById("query-status")
+        .textContent = "Error";
 
-document.getElementById("query-status")
-.textContent = "Error";
+        appendSystemMessage("Query failed");
 
-appendSystemMessage("Query failed");
+    })
+    .finally(()=>{
 
-})
-.finally(()=>{
-
-document.getElementById("question-input").value = "";
-
+        document.getElementById("question-input")
+        .value = "";
+    });
 });
 
-});
-
-/* ------------------------------ */
+/* ================================================= */
 /* Init */
-/* ------------------------------ */
+/* ================================================= */
 
 refreshDocuments();
 
