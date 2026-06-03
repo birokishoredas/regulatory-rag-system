@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Request, HTTPException, status
 from pydantic import ValidationError
+import time
 import asyncio
 
 from src.shared.schemas import QueryRequest
@@ -100,6 +101,7 @@ async def query(payload: dict, request: Request):
     # -------------------------------------------------
 
     try:
+        pipeline_start = time.time()
         result = await request.app.state.rag_pipeline.run(
             query=qreq.question,
             filters=qreq.filters,
@@ -127,6 +129,9 @@ async def query(payload: dict, request: Request):
             filters=qreq.filters,
             result=result,
         )
+        pipeline_latency_ms = int(
+            (time.time() - pipeline_start) * 1000
+        )
 
         # -------------------------------------------------
         # Optional background logging
@@ -152,6 +157,7 @@ async def query(payload: dict, request: Request):
                 "grounding_score": evaluation.get("grounding_score"),
                 "judge_score": evaluation.get("judge_score"),
                 "citation_score": evaluation.get("citation_score"),
+                "pipeline_latency_ms": pipeline_latency_ms,
                 "latency_ms": evaluation.get("latency_ms"),
                 "num_citations": evaluation.get("num_citations"),
                 "faithfulness": evaluation.get("faithfulness"),
