@@ -375,7 +375,7 @@ function appendAssistantMessage(
         <details class="evaluation-box" open>
 
         <summary>
-        📊 Evaluation Metrics
+        Evaluation Metrics
         </summary>
 
         <div class="metric-row">
@@ -389,7 +389,7 @@ function appendAssistantMessage(
         </div>
 
         <div class="metric-row">
-            🧠 Judge Score:
+            Judge Score:
             <strong>
             ${Number(
                 evaluation.judge_score || 0
@@ -399,7 +399,7 @@ function appendAssistantMessage(
         </div>
 
         <div class="metric-row">
-            📚 Citation Score:
+            Citation Score:
             <strong>
             ${Number(
                 evaluation.citation_score || 0
@@ -408,7 +408,15 @@ function appendAssistantMessage(
         </div>
 
         <div class="metric-row">
-            ⚡ Latency:
+            Pipeline Latency:
+            <strong>
+            ${evaluation.pipeline_latency_ms || 0}
+            ms
+            </strong>
+        </div>
+
+        <div class="metric-row">
+            Evaluation Latency:
             <strong>
             ${evaluation.latency_ms || 0}
             ms
@@ -416,7 +424,7 @@ function appendAssistantMessage(
         </div>
 
         <div class="metric-row">
-            🔖 Citations Used:
+            Citations Used:
             <strong>
             ${evaluation.num_citations || 0}
             </strong>
