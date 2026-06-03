@@ -1,282 +1,193 @@
+
 # Regulatory RAG System
 
-Production-grade Retrieval-Augmented Generation (RAG) system for regulatory document intelligence with hybrid retrieval, reranking, evaluation pipelines, citation grounding, and observability.
+Production-grade Retrieval-Augmented Generation (RAG) platform for regulatory document intelligence. The system combines structure-aware document ingestion, hybrid retrieval, reranking, grounded answer generation, evaluation, guardrails, caching, observability, and workflow orchestration into a single production-ready architecture.
 
 ---
 
-# Project Overview
+# Project Highlights
 
-This project demonstrates how to build a production-oriented AI system capable of:
+This project demonstrates end-to-end AI system engineering rather than a simple "upload PDF and ask questions" workflow.
 
-* Ingesting regulatory PDFs/documents
-* Chunking and embedding large documents
-* Performing hybrid retrieval (semantic + lexical)
-* Applying cross-encoder reranking
-* Generating grounded answers with citations
-* Running automated evaluation metrics
-* Preventing hallucinations using guardrails
-* Tracking conversations and caching responses
-* Serving everything through a FastAPI application with UI
+Key capabilities include:
 
-The system is designed with real-world AI engineering principles:
-
-* modular architecture
-* observability
-* defensive validation
-* evaluation-driven development
-* production-focused retrieval pipelines
+- Structure-aware document ingestion using LlamaParse
+- Regulatory-aware chunking with paragraph and section indexes
+- Hybrid retrieval (BM25 + Vector Search)
+- Dynamic retrieval weighting
+- Cross-encoder reranking
+- Grounded answer generation with citations
+- Citation and grounding validation
+- Conversation-aware query rewriting
+- Runtime evaluation framework
+- Response caching
+- Conversation memory
+- LangGraph orchestration
+- LangSmith tracing
+- Structured observability
 
 ---
 
 # System Architecture
 
-## High-Level Pipeline
-
 ```text
-User Query
-    ↓
-Query Rewriter
-    ↓
-Hybrid Retriever
-(BM25 + Vector Search)
-    ↓
-Cross Encoder Reranker
-    ↓
-Guardrails + Validation
-    ↓
-LLM Answer Generation
-    ↓
-Citation Extraction
-    ↓
-Evaluation Engine
-    ↓
-FastAPI Response + UI Rendering
+                        User
+                          │
+                          ▼
+                    FastAPI Layer
+                          │
+                          ▼
+                     RAGPipeline
+                          │
+     ┌────────────────────┼────────────────────┐
+     │                    │                    │
+     ▼                    ▼                    ▼
+Conversation       Cache Manager      Query Rewriter
+History
+     │                    │                    │
+     └────────────────────┼────────────────────┘
+                          ▼
+                    HybridRetriever
+                          │
+         ┌────────────────┼────────────────┐
+         │                                 │
+         ▼                                 ▼
+     BM25 Search                    Vector Search
+         │                                 │
+         └────────────────┬────────────────┘
+                          ▼
+                    Score Fusion
+                          ▼
+                CrossEncoderReranker
+                          ▼
+                  AnswerGenerator
+                          ▼
+                   AnswerGuardrails
+                          ▼
+                   ConversationStore
+                          ▼
+                     RAGEvaluator
+                          ▼
+                     API Response
 ```
 
 ---
 
-# Core Technical Features
+# Architecture Documentation
 
-## 1. Hybrid Retrieval Pipeline
+The repository contains detailed engineering documentation inside the `docs/` folder.
 
-Implemented a production-style retrieval architecture:
+| Document | Purpose |
+|-----------|----------|
+| [Architecture](docs/architecture.md) | Complete system architecture, component interactions, dependency flow, storage architecture, orchestration model, observability and production design. |
+| [Ingestion Pipeline](docs/ingestion.md) | LlamaParse integration, document processing workflow, chunk generation, embeddings, deduplication, storage strategy and indexing architecture. |
+| [Retrieval System](docs/retrieval.md) | Safe query rewriting, HybridRetriever V2, BM25 retrieval, vector retrieval, fusion, reranking and retrieval safeguards. |
+| [Workflow Orchestration](docs/orchestration.md) | LangGraph workflow execution, state propagation, caching, memory integration, fallback mechanisms and pipeline coordination. |
+| [Evaluation Framework](docs/evaluation.md) | Grounding metrics, citation scoring, LLM-as-a-Judge, RAGAS integration and runtime evaluation architecture. |
 
-### Semantic Retrieval
-
-* Dense vector embeddings
-* Amazon Titan Embeddings
-* Vector similarity search
-
-### Lexical Retrieval
-
-* BM25 keyword retrieval
-* Exact terminology matching
-* Regulatory phrase prioritization
-
-### Retrieval Fusion
-
-* Combined lexical + semantic retrieval
-* Improved recall for compliance documents
-* Better handling of long-tail terminology
+These documents describe the actual implementation, architectural decisions, tradeoffs, scalability considerations, and future evolution of the system.
 
 ---
 
-## 2. Cross Encoder Reranking
+# Core Engineering Components
 
-Implemented a second-stage reranking pipeline using:
+## Document Ingestion
+
+- LlamaParse-based document parsing
+- Structured section extraction
+- Metadata lineage preservation
+- Regulatory-aware chunking
+- Paragraph chunk generation
+- Section chunk generation
+- Amazon Titan embedding generation
+- PostgreSQL persistence
+- Hash-based deduplication
+- Source-based document replacement
+
+---
+
+## Retrieval Layer
+
+### HybridRetriever V2
+
+Combines:
+
+- PostgreSQL Full Text Search (BM25)
+- pgvector similarity search
+
+Features:
+
+- Query expansion
+- Dynamic retrieval weighting
+- Metadata-aware retrieval
+- Document isolation
+- Score normalization
+- Weighted fusion
+- Retrieval fallback mechanisms
+
+---
+
+## Reranking Layer
+
+### CrossEncoderReranker
+
+Model:
 
 ```text
 cross-encoder/ms-marco-MiniLM-L-6-v2
 ```
 
+Responsibilities:
+
+- Relevance scoring
+- Precision improvement
+- Metadata-aware ranking
+- Context prioritization
+- Top-K refinement
+
+---
+
+## Answer Generation
+
+### AnswerGenerator
+
 Capabilities:
 
-* semantic relevance scoring
-* metadata-aware reranking
-* section-aware ranking
-* top-k refinement
-* fallback handling
-
-This significantly improves final context quality before answer generation.
+- Grounded answer generation
+- Citation generation
+- Single-document reasoning
+- Context-aware prompting
+- Hallucination reduction
 
 ---
 
-# LLM Orchestration
+## Guardrails
 
-## Model Layer
+### AnswerGuardrails
 
-### LLM
+Validation performed before response delivery:
 
-* Groq-hosted LLM inference
-* configurable providers
-* temperature-controlled generation
-
-### Embeddings
-
-* Amazon Titan Embeddings
-* Bedrock integration
-
-### Prompt Engineering
-
-Custom prompt templates enforce:
-
-* grounded generation
-* citation requirements
-* anti-hallucination constraints
-* concise regulatory responses
+- Citation validation
+- Citation filtering
+- Grounding validation
+- Source consistency enforcement
+- Unsupported answer detection
 
 ---
 
-# Hallucination Prevention & Guardrails
+## Evaluation Framework
 
-A dedicated guardrails layer validates:
+### RAGEvaluator
 
-## Citation Validation
+Metrics:
 
-* verifies all citations exist
-* prevents fake citations
-* validates chunk references
+- Semantic Grounding Score
+- Citation Score
+- Judge Score
+- Optional RAGAS Metrics
+- Pipeline Latency Metrics
 
-## Grounding Validation
-
-* computes answer-context overlap
-* rejects unsupported generations
-* detects weak evidence alignment
-
-## Multi-document Safety
-
-* prevents unsafe cross-document answers
-* enforces single-document grounding
-
----
-
-# Evaluation System
-
-The project includes a production-style evaluation pipeline.
-
-## Metrics Implemented
-
-### Semantic Grounding Score
-
-Measures similarity between:
-
-* generated answer
-* retrieved evidence
-
-using cosine similarity over embeddings.
-
----
-
-### LLM-as-a-Judge
-
-The system automatically evaluates:
-
-* correctness
-* completeness
-* supportiveness
-
-using an independent LLM evaluator.
-
----
-
-### Citation Score
-
-Measures:
-
-* citation coverage
-* evidence utilization
-* grounding quality
-
----
-
-### Optional RAGAS Integration
-
-Support for:
-
-* faithfulness
-* answer relevancy
-* context precision
-* context recall
-
----
-
-# Performance Optimizations
-
-## Context Limiting
-
-* token-safe chunk limiting
-* prevents context overflow
-* adaptive chunk selection
-
-## In-memory Caching
-
-* TTL cache
-* avoids repeated LLM calls
-* namespace-aware caching
-
-## Background Evaluation
-
-* asynchronous evaluation execution
-* non-blocking API responses
-
----
-
-# Production Engineering Features
-
-## Structured Logging
-
-Implemented JSON-based structured logging using:
-
-```text
-structlog
-```
-
-Logs include:
-
-* retrieval metrics
-* reranking scores
-* grounding failures
-* latency metrics
-* evaluation metrics
-* cache hits
-
----
-
-## Typed Schema Design
-
-Implemented fully typed Pydantic schemas for:
-
-* retrieval state
-* ingestion state
-* RAG pipeline state
-* API contracts
-* chunk metadata
-* evaluation outputs
-
----
-
-## Async Architecture
-
-Built using:
-
-* FastAPI async endpoints
-* async evaluation execution
-* async DB operations
-* async retrieval orchestration
-
----
-
-# UI Features
-
-Custom frontend interface supports:
-
-* document ingestion
-* live querying
-* citation visualization
-* evaluation metric rendering
-* per-document chat sessions
-* document filtering
-* ingestion state handling
+Evaluation results are persisted for monitoring and quality tracking.
 
 ---
 
@@ -284,41 +195,104 @@ Custom frontend interface supports:
 
 ## Backend
 
-* Python
-* FastAPI
-* LangChain
-* LangGraph
-* Pydantic
-* AsyncIO
+- Python
+- FastAPI
+- AsyncIO
+- Pydantic
+
+## Workflow Orchestration
+
+- LangGraph
+
+## LLM Layer
+
+- Groq
+- LangChain
+
+## Embeddings
+
+- Amazon Titan Embeddings
+- AWS Bedrock
+
+## Retrieval
+
+- PostgreSQL Full Text Search
+- pgvector
+- Hybrid Retrieval
+- Cross-Encoder Reranking
+
+## Evaluation
+
+- RAGAS (Optional)
+
+## Observability
+
+- Structlog
+- LangSmith
+
+## Database
+
+- PostgreSQL
+- pgvector
 
 ---
 
-## AI/ML Stack
+# Production Features
 
-* Groq LLMs
-* Amazon Titan Embeddings
-* SentenceTransformers
-* CrossEncoder Reranking
-* RAGAS
+## Observability
+
+- Structured JSON logging
+- Retrieval diagnostics
+- Reranking diagnostics
+- Evaluation metrics
+- Latency monitoring
+- LangSmith traces
+
+## Reliability
+
+- Custom exception framework
+- Fault isolation
+- Recovery mechanisms
+- Retrieval fallback
+- Reranker collapse protection
+
+## Performance
+
+- Response caching
+- Async execution
+- Background evaluation
+- Optimized retrieval pipeline
+
+---
+# Current Limitations
+
+Current implementation limitations include:
+
+- Single-document grounding strategy
+- In-memory caching implementation
+- Static query expansion
+- Rule-based retrieval weighting
+- No multimodal retrieval support
+- No distributed ingestion architecture
+- No streaming response generation
+
+These tradeoffs were intentionally chosen to prioritize reliability, explainability, and maintainability.
 
 ---
 
-## Retrieval Stack
+# Future Enhancements
 
-* Hybrid Retrieval
-* Vector Search
-* BM25
-* Reranking Pipelines
+Potential future enhancements include:
 
----
-
-## Infrastructure
-
-* PostgreSQL
-* pgvector
-* Bedrock
-* Structlog
-* TTL Cache
+- Multimodal document understanding
+- OCR support for scanned documents
+- Graph-based retrieval
+- Adaptive query expansion
+- Learned retrieval weighting
+- Distributed ingestion workers
+- Streaming response generation
+- Agentic workflows
+- Retrieval quality feedback loops
 
 ---
 
@@ -326,6 +300,13 @@ Custom frontend interface supports:
 
 ```text
 REGULATORY-RAG-SYSTEM/
+│
+├── docs/
+│   ├── architecture.md
+│   ├── evaluation.md
+│   ├── ingestion.md
+│   ├── orchestration.md
+│   └── retrieval.md
 │
 ├── config/
 ├── exception/
@@ -365,70 +346,15 @@ REGULATORY-RAG-SYSTEM/
 
 ---
 
-# Engineering Challenges Solved
-
-## Retrieval Quality Problems
-
-Solved using:
-
-* hybrid retrieval
-* reranking
-* metadata-aware scoring
-
----
-
-## Hallucination Prevention
-
-Solved using:
-
-* grounding validation
-* strict prompting
-* citation enforcement
-* evidence overlap checks
-
----
-
-## Production Observability
-
-Solved using:
-
-* structured logs
-* evaluation metrics
-* latency tracking
-* tracing metadata
-
----
-
-## Context Explosion
-
-Solved using:
-
-* token-safe context limiting
-* chunk prioritization
-* reranking
-
----
-
-# Example Evaluation Output
-
-```text
-Grounding Score: 0.91
-Judge Score: 4.5 / 5
-Citation Score: 1.00
-Latency: 1320 ms
-Citations Used: 4
-```
-
-
 # How to Run
 
-## Create Environment
+## Create Virtual Environment
 
 ```bash
 uv venv
 ```
 
-## Activate
+## Activate Environment
 
 ### Windows
 
@@ -436,13 +362,11 @@ uv venv
 .venv\Scripts\activate
 ```
 
-### Linux / Mac
+### Linux / macOS
 
 ```bash
 source .venv/bin/activate
 ```
-
----
 
 ## Install Dependencies
 
@@ -450,9 +374,7 @@ source .venv/bin/activate
 uv pip install -r requirements.txt
 ```
 
----
-
-## Run FastAPI
+## Run Application
 
 ```bash
 uvicorn main:app --reload
@@ -460,66 +382,72 @@ uvicorn main:app --reload
 
 ---
 
-# Interview Talking Points
+# Design Decisions & Tradeoffs
+
+Key architectural decisions made during development include:
+
+- PostgreSQL + pgvector instead of a dedicated vector database to simplify operations and maintain transactional consistency.
+- Hybrid retrieval instead of vector-only retrieval to balance semantic understanding and exact regulatory matching.
+- Dual-index chunking (paragraph + section) to improve both retrieval precision and recall.
+- Cross-encoder reranking to separate recall optimization from precision optimization.
+- LangGraph orchestration to provide stateful workflow execution and future extensibility.
+- Runtime evaluation to continuously measure answer quality in production.
+
+Detailed discussions are available in the documentation inside the `docs/` directory.
+
+---
+
+# Engineering Deep Dive
 
 ## Retrieval Engineering
 
-* hybrid retrieval strategies
-* dense vs sparse retrieval
-* reranking architectures
-* chunking strategies
-* metadata-aware ranking
+- Hybrid retrieval architecture
+- BM25 vs vector retrieval
+- Query expansion strategies
+- Dynamic retrieval weighting
+- Dual-index retrieval design
 
----
+## RAG Architecture
 
-## LLM Systems Engineering
+- Structure-aware chunking
+- Retrieval-first system design
+- Grounded generation
+- Citation enforcement
+- Guardrail architecture
 
-* grounding enforcement
-* hallucination prevention
-* prompt constraints
-* evaluation-driven development
+## AI Platform Engineering
 
----
+- LangGraph orchestration
+- Runtime evaluation
+- Conversation memory
+- Caching strategy
+- Observability design
 
-## Production AI Engineering
+## Production AI Systems
 
-* observability
-* structured logging
-* async architecture
-* caching
-* evaluation pipelines
-* schema-driven design
-
----
-
-## AI Evaluation
-
-* semantic grounding
-* LLM-as-a-judge
-* citation coverage
-* automated QA evaluation
+- Fault tolerance
+- Monitoring and tracing
+- Structured logging
+- Evaluation-driven development
+- Scalable document intelligence systems
 
 ---
 
 # Why This Project Stands Out
 
-Most RAG demos only implement:
+This project demonstrates production-grade AI engineering patterns including:
 
-* upload PDF
-* ask question
+- End-to-end RAG architecture
+- Hybrid retrieval
+- Dual-index chunking strategy
+- Cross-encoder reranking
+- Runtime evaluation
+- Citation grounding
+- Guardrails
+- Workflow orchestration
+- Observability
+- Caching
+- Conversation memory
+- Structured system design
 
-This project demonstrates:
-
-* hybrid retrieval
-* reranking
-* grounding validation
-* citation enforcement
-* evaluation pipelines
-* production observability
-* caching
-* async architecture
-* typed schema design
-* guardrails
-* real-world AI engineering patterns
-
----
+The focus is not only on answer generation but on building a reliable, measurable, maintainable, and production-ready AI platform.
